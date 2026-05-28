@@ -2,18 +2,8 @@
 
 设计（中长线 / 每晚 8 点一次）：
 - 每晚跑一次，对比 state 里上次已推送的调仓时间；有更新才做 AI + 推送调仓段
-- 同一天组合调仓多次：当晚合并为一条 digest，按时间顺序列出各批次（非实时跟单）
-- state 类似轻量账户：组合进度 + 持仓成本盈亏快照
-- 评论始终拉最新若干条，不按「模拟日期」过滤
-
-本地:
-    python daily_portfolio_digest.py
-
-单股舆情 + DeepSeek + 钉钉（推荐先跑通）:
-    python daily_portfolio_digest.py --test-one
-
-测试指定「当前时间」（仅影响调仓判定与运行时间展示，评论仍最新）:
-    将 TEST_SIMULATE_NOW 设为 "2026-05-18 20:00:00"，测完改回 None
+- 同一天组合调仓多次：当晚合并为一条 digest，按时间顺序列出各批次
+- 推送默认 HTML 渲染为图片（见 digest/ 目录）
 """
 
 from __future__ import annotations
@@ -91,12 +81,8 @@ MAX_BATCHES_PER_PORTFOLIO = 3
 # 单次运行最多调用 DeepSeek 次数（防首次未 init-state 爆量）
 MAX_AI_CALLS_PER_RUN = 8
 
-# 测试：模拟「今晚 8 点」的时间点，仅用于调仓新旧对比；测完务必改回 None
+# 测试：模拟「今晚 8 点」的时间点；生产环境保持 None
 TEST_SIMULATE_NOW: str | None = None
-# TEST_SIMULATE_NOW = "2026-05-18 20:00:00"
-
-# 单股测试（配合 --test-one）：只抓这一只 → DeepSeek → 钉钉，不走组合/持仓
-TEST_ONE_STOCK = {"code": "600105", "name": "永鼎股份"}
 
 STATE_VERSION = 3
 
@@ -674,11 +660,14 @@ def build_account_summary(
         cash = None
         total_assets = market_value if market_value > 0 else cfg_assets
 
-    last_total = state.get("account", {}).get("last_total_assets")
+    # 当日收益率：相对「昨日总资产」≈ 今日总资产 − 当日盈亏（与雪球 +1.91% 口径一致）
+    # 不用 last_total_assets 对比：MY_ACCOUNT.total_assets 是手填静态值，与 state 相同会得到 0%
     daily_pnl_pct = None
-    if last_total and float(last_total) > 0 and total_assets is not None:
-        daily_pnl_pct = round((float(total_assets) - float(last_total)) / float(last_total) * 100, 2)
-    elif market_value > 0:
+    if total_assets is not None:
+        prev_total = float(total_assets) - daily_pnl
+        if prev_total > 0:
+            daily_pnl_pct = round(daily_pnl / prev_total * 100, 2)
+    elif market_value > daily_pnl:
         daily_pnl_pct = round(daily_pnl / (market_value - daily_pnl) * 100, 2)
 
     cost_basis = sum((q.cost_price or 0) * (q.shares or 0) for q in quotes if q.cost_price)
@@ -959,12 +948,55 @@ def send_dingtalk_markdown(title: str, md_text: str) -> bool:
         return False
 
 
+def _digest_push_title(updates: list[PortfolioUpdate]) -> str:
+    if not updates:
+        return "每日组合"
+    names = "、".join(u.portfolio_name for u in updates[:2])
+    if len(updates) > 2:
+        names += f" 等{len(updates)}个"
+    return f"组合调仓 · {names}"
+
+
 def send_dingtalk_digest(
     *,
-    holdings_md: str,
-    updates: list[PortfolioUpdate],
     run_time: str,
+    account: AccountSummary | None = None,
+    quotes: list[HoldingQuote] | None = None,
+    updates: list[PortfolioUpdate] | None = None,
+    force_markdown: bool = False,
 ) -> None:
+    """推送简报：默认 HTML 渲染为图片；失败时回退 Markdown。"""
+    from digest import render as digest_render
+
+    updates = updates or []
+    title = _digest_push_title(updates)
+    simulate_note = f"模拟 {TEST_SIMULATE_NOW}" if TEST_SIMULATE_NOW else ""
+    push_mode = digest_render.DIGEST_PUSH_MODE or "image"
+
+    if not force_markdown and push_mode in ("image", "both"):
+        try:
+            ok, local_path = digest_render.push_digest_image(
+                run_time=run_time,
+                simulate_note=simulate_note,
+                account=account,
+                quotes=quotes,
+                updates=updates,
+                title=title,
+            )
+            if ok and push_mode == "image":
+                return
+            if ok and push_mode == "both":
+                print("      图片已推送，继续发送 Markdown 摘要…")
+            elif local_path:
+                print(f"      图床未配置或上传失败，已生成本地预览: {local_path}")
+                print("      建议在 .env 配置 IMG_BB_API_KEY 后重试（见 docs/DIGEST_GITHUB_SETUP.md）")
+        except Exception as exc:
+            print(f"      图片简报失败，回退 Markdown: {exc}")
+
+    holdings_md = ""
+    if quotes and account:
+        holdings_md = _holdings_markdown(quotes, account)
+
     mode = f" · 模拟 {TEST_SIMULATE_NOW}" if TEST_SIMULATE_NOW else ""
     md_parts = [
         f"## 📊 每日组合简报{mode}",
@@ -986,16 +1018,7 @@ def send_dingtalk_digest(
     elif not holdings_md:
         md_parts.append("今晚无持仓配置且无待推送的调仓。")
 
-    md_text = "\n".join(md_parts).rstrip() + "\n"
-
-    title = "每日组合"
-    if updates:
-        names = "、".join(u.portfolio_name for u in updates[:2])
-        if len(updates) > 2:
-            names += f" 等{len(updates)}个"
-        title = f"组合调仓 · {names}"
-
-    send_dingtalk_markdown(title, md_text)
+    send_dingtalk_markdown(title, "\n".join(md_parts).rstrip() + "\n")
 
 
 def init_portfolio_state_only() -> None:
@@ -1014,43 +1037,6 @@ def init_portfolio_state_only() -> None:
         time.sleep(random.uniform(0.8, 1.5))
     save_state(state)
     print("state 已同步至最新调仓，后续每晚只推送新变化。")
-
-
-def run_test_one_stock() -> None:
-    """单股链路测试：雪球评论 → DeepSeek → 钉钉（不扫组合、不写 state）。"""
-    code = normalize_stock_code(str(TEST_ONE_STOCK.get("code", "")))
-    name = str(TEST_ONE_STOCK.get("name", code)).strip()
-    if not code:
-        print("请在 TEST_ONE_STOCK 中填写 code / name。")
-        return
-
-    run_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-    print(f"=== 单股舆情测试 {name} ({code}) @ {run_time} ===")
-
-    client = XueQiuApiClient()
-    comments = fetch_stock_comments(client, code)
-    print(f"\n评论样本长度: {len(comments)} 字符")
-    if comments:
-        first_line = comments.split("\n", 1)[0]
-        print(f"首条: {first_line[:80]}…")
-
-    print()
-    summary = call_deepseek_summary(name, comments, verbose=True)
-    print("\n---------- DeepSeek 完整输出 ----------\n")
-    print(summary)
-    print("\n----------------------------------------\n")
-
-    summary_lines = summary.split("\n")
-    formatted = "\n> ".join(summary_lines)
-    md = (
-        f"## 每日组合 · 舆情测试 · {name}\n\n"
-        f"**代码：** {code}  \n"
-        f"**时间：** {run_time}  \n"
-        f"**评论条数：** {len([ln for ln in comments.splitlines() if ln.strip()])}  \n\n"
-        f"> **DeepSeek 研判**\n>\n> {formatted}\n"
-    )
-    send_dingtalk_markdown(f"组合舆情 {name}", md)
-    print("=== 单股测试结束 ===")
 
 
 def check_portfolio_for_nightly_digest(
@@ -1134,7 +1120,7 @@ def check_portfolio_for_nightly_digest(
     )
 
 
-def run_holdings_only() -> None:
+def run_holdings_only(*, force_markdown: bool = False) -> None:
     """仅推送个人持仓行情，不扫组合、不调 DeepSeek。"""
     run_time = _now().strftime("%Y-%m-%d %H:%M")
     print(f"=== 仅持仓简报 ({run_time}) ===")
@@ -1146,16 +1132,17 @@ def run_holdings_only() -> None:
     account_summary = build_account_summary(quotes, state)
     update_holdings_state(state, quotes, account_summary)
     save_state(state)
-    run_time = _now().strftime("%Y-%m-%d %H:%M")
-    holdings_md = _holdings_markdown(quotes, account_summary)
-    send_dingtalk_markdown(
-        "每日组合",
-        f"## 📊 持仓简报\n\n> {run_time}\n\n{holdings_md}",
+    send_dingtalk_digest(
+        run_time=run_time,
+        account=account_summary,
+        quotes=quotes,
+        updates=[],
+        force_markdown=force_markdown,
     )
     print("=== 执行完毕 ===")
 
 
-def main(*, skip_portfolios: bool = False) -> None:
+def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None:
     run_time = _now().strftime("%Y-%m-%d %H:%M")
     sim_note = f" [模拟时间，TEST_SIMULATE_NOW={TEST_SIMULATE_NOW}]" if TEST_SIMULATE_NOW else ""
     print(f"=== 每日组合 Digest ({run_time}){sim_note} ===")
@@ -1191,19 +1178,25 @@ def main(*, skip_portfolios: bool = False) -> None:
 
     state["last_digest_at"] = run_time
 
-    holdings_md = ""
+    quotes: list[HoldingQuote] | None = None
+    account_summary: AccountSummary | None = None
     if MY_HOLDINGS and (ALWAYS_SEND_HOLDINGS or updates):
         print("\n拉取个人持仓行情（现价 + 后复权）…")
         quotes = fetch_holding_quotes(MY_HOLDINGS, state=state)
         account_summary = build_account_summary(quotes, state)
         update_holdings_state(state, quotes, account_summary)
-        holdings_md = _holdings_markdown(quotes, account_summary)
 
     save_state(state)
 
     should_send = bool(updates) or (ALWAYS_SEND_HOLDINGS and bool(MY_HOLDINGS))
     if should_send:
-        send_dingtalk_digest(holdings_md=holdings_md, updates=updates, run_time=run_time)
+        send_dingtalk_digest(
+            run_time=run_time,
+            account=account_summary,
+            quotes=quotes,
+            updates=updates,
+            force_markdown=force_markdown,
+        )
     else:
         print("今晚无调仓待推送且未开启持仓推送，跳过钉钉。")
 
@@ -1212,11 +1205,6 @@ def main(*, skip_portfolios: bool = False) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="每日组合 Digest")
-    parser.add_argument(
-        "--test-one",
-        action="store_true",
-        help="单股测试：仅 TEST_ONE_STOCK，走 DeepSeek + 钉钉",
-    )
     parser.add_argument(
         "--init-state",
         action="store_true",
@@ -1227,12 +1215,15 @@ if __name__ == "__main__":
         action="store_true",
         help="仅推送个人持仓，不扫组合、不调 AI",
     )
+    parser.add_argument(
+        "--push-markdown",
+        action="store_true",
+        help="强制 Markdown 文本推送（默认 HTML 渲染为图片）",
+    )
     args = parser.parse_args()
-    if args.test_one:
-        run_test_one_stock()
-    elif args.init_state:
+    if args.init_state:
         init_portfolio_state_only()
     elif args.holdings_only:
-        run_holdings_only()
+        run_holdings_only(force_markdown=args.push_markdown)
     else:
-        main(skip_portfolios=False)
+        main(skip_portfolios=False, force_markdown=args.push_markdown)

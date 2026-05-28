@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=390" />
+  <title>{{ title }}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 390px;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: linear-gradient(165deg, #f0f4f8 0%, #e8eef5 100%);
+      color: #1a1a1a;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { padding: 16px 14px 20px; }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      margin-bottom: 14px;
+    }
+    .header h1 {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .header .time {
+      font-size: 12px;
+      color: #8a9199;
+    }
+    .sim {
+      font-size: 11px;
+      color: #b8860b;
+      margin-top: 4px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 14px;
+      padding: 14px 14px 12px;
+      margin-bottom: 12px;
+      box-shadow: 0 2px 12px rgba(0, 40, 80, 0.06);
+    }
+    .card-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #5c6570;
+      margin-bottom: 10px;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .metric {
+      background: #f7f9fc;
+      border-radius: 10px;
+      padding: 10px 10px 8px;
+    }
+    .metric.full { grid-column: 1 / -1; }
+    .metric .label {
+      font-size: 11px;
+      color: #8a9199;
+      margin-bottom: 4px;
+    }
+    .metric .value {
+      font-size: 17px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .metric .sub {
+      font-size: 12px;
+      margin-top: 2px;
+      font-weight: 500;
+    }
+    .up { color: #e54545; }
+    .down { color: #14a85c; }
+    .flat { color: #8a9199; }
+
+    table.holdings {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+    table.holdings th {
+      text-align: left;
+      color: #8a9199;
+      font-weight: 500;
+      padding: 0 0 8px;
+      border-bottom: 1px solid #eef1f5;
+    }
+    table.holdings th.num { text-align: right; }
+    table.holdings td {
+      padding: 10px 0;
+      border-bottom: 1px solid #f3f5f8;
+      vertical-align: top;
+    }
+    table.holdings tr:last-child td { border-bottom: none; }
+    table.holdings td.num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .stock-name {
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+    .stock-code {
+      font-size: 10px;
+      color: #8a9199;
+      margin-top: 2px;
+    }
+    .stock-meta {
+      font-size: 10px;
+      color: #8a9199;
+      margin-top: 3px;
+    }
+    .err { color: #c0392b; font-size: 11px; }
+
+    .rebalance-block { margin-bottom: 14px; }
+    .rebalance-block:last-child { margin-bottom: 0; }
+    .rb-portfolio {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+    .rb-id {
+      font-size: 10px;
+      color: #8a9199;
+      margin-bottom: 8px;
+    }
+    .rb-time {
+      font-size: 11px;
+      color: #5c6570;
+      margin-bottom: 8px;
+      padding-left: 8px;
+      border-left: 3px solid #3b82f6;
+    }
+    .rb-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .rb-badge {
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: #fff;
+    }
+    .rb-badge.buy { background: #e54545; }
+    .rb-badge.sell { background: #14a85c; }
+    .rb-badge.other { background: #8a9199; }
+    .rb-detail { flex: 1; min-width: 0; }
+    .rb-stock { font-size: 13px; font-weight: 600; }
+    .rb-extra { font-size: 11px; color: #5c6570; margin-top: 2px; }
+    .rb-trade {
+      padding: 8px 0;
+      border-bottom: 1px solid #f3f5f8;
+    }
+    .rb-trade:last-child { border-bottom: none; }
+    .rb-ai {
+      margin-top: 8px;
+      margin-left: 0;
+      padding: 10px 12px;
+      background: #f7f9fc;
+      border-radius: 8px;
+      font-size: 11px;
+      line-height: 1.65;
+      color: #3d4650;
+      text-align: left;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+    .rb-ai-title {
+      font-size: 10px;
+      font-weight: 600;
+      color: #3b82f6;
+      margin-bottom: 6px;
+    }
+    .rb-ai p {
+      margin: 0 0 6px;
+    }
+    .rb-ai p:last-child { margin-bottom: 0; }
+    .footer {
+      text-align: center;
+      font-size: 10px;
+      color: #b0b8c0;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <h1>{{ title }}</h1>
+        {% if simulate_note %}
+        <div class="sim">{{ simulate_note }}</div>
+        {% endif %}
+      </div>
+      <div class="time">{{ run_time }}</div>
+    </div>
+
+    {% if account %}
+    <div class="card">
+      <div class="card-title">{{ account.name }} · 账户概览</div>
+      <div class="metrics">
+        {% if account.total_assets is not none %}
+        <div class="metric full">
+          <div class="label">总资产</div>
+          <div class="value">{{ account.total_assets_fmt }}</div>
+          {% if account.cash_fmt %}
+          <div class="sub flat">市值 {{ account.market_value_fmt }} · 现金 {{ account.cash_fmt }}</div>
+          {% else %}
+          <div class="sub flat">市值 {{ account.market_value_fmt }}</div>
+          {% endif %}
+        </div>
+        {% endif %}
+        <div class="metric">
+          <div class="label">当日盈亏</div>
+          <div class="value {{ account.daily_cls }}">{{ account.daily_pnl_fmt }}</div>
+          <div class="sub {{ account.daily_cls }}">{{ account.daily_pnl_pct_fmt }}</div>
+        </div>
+        <div class="metric">
+          <div class="label">持有盈亏</div>
+          <div class="value {{ account.holding_cls }}">{{ account.holding_pnl_fmt }}</div>
+          <div class="sub {{ account.holding_cls }}">{{ account.holding_pnl_pct_fmt }}</div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    {% if holdings %}
+    <div class="card">
+      <div class="card-title">持仓明细（{{ holdings|length }} 只）</div>
+      <table class="holdings">
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th class="num">现价</th>
+            <th class="num">今日</th>
+            <th class="num">持仓盈亏</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in holdings %}
+          <tr>
+            <td>
+              {% if h.error %}
+              <div class="stock-name">{{ h.name }}</div>
+              <div class="stock-code">{{ h.code }}</div>
+              <div class="err">{{ h.error }}</div>
+              {% else %}
+              <div class="stock-name">{{ h.name }}</div>
+              <div class="stock-code">{{ h.code }}</div>
+              <div class="stock-meta">
+                {% if h.holding_days is not none %}持股 {{ h.holding_days }} 天{% endif %}
+                {% if h.shares_fmt %} · {{ h.shares_fmt }}{% endif %}
+                {% if h.weight_fmt %} · 仓位 {{ h.weight_fmt }}{% endif %}
+              </div>
+              {% endif %}
+            </td>
+            <td class="num">{{ h.price_fmt }}</td>
+            <td class="num {{ h.change_cls }}">
+              {{ h.change_pct_fmt }}<br>
+              <span style="font-size:10px">{{ h.daily_pnl_fmt }}</span>
+            </td>
+            <td class="num {{ h.pnl_cls }}">
+              {{ h.pnl_pct_fmt }}<br>
+              <span style="font-size:10px">{{ h.pnl_amt_fmt }}</span>
+              {% if h.hfq_pnl_fmt %}
+              <br><span style="font-size:9px;color:#8a9199">后复权 {{ h.hfq_pnl_fmt }}</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if updates %}
+    <div class="card">
+      <div class="card-title">组合调仓</div>
+      {% for upd in updates %}
+      <div class="rebalance-block">
+        <div class="rb-portfolio">{{ upd.portfolio_name }}</div>
+        <div class="rb-id">{{ upd.portfolio_id }}</div>
+        {% for batch in upd.batches %}
+        <div class="rb-time">{{ batch.rebalance_time }}</div>
+        {% for item in batch.records %}
+        <div class="rb-trade">
+          <div class="rb-row">
+            <span class="rb-badge {{ item.badge_cls }}">{{ item.action_short }}</span>
+            <div class="rb-detail">
+              <div class="rb-stock">{{ item.name }} <span style="font-weight:400;color:#8a9199">{{ item.code }}</span></div>
+              <div class="rb-extra">{{ item.price }} · {{ item.weight_change }}</div>
+            </div>
+          </div>
+          {% if item.ai_summary %}
+          <div class="rb-ai">
+            <div class="rb-ai-title">AI 舆情</div>
+            {% for line in item.ai_lines %}
+            <p>{{ line }}</p>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </div>
+        {% endfor %}
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+  {% if not account and not holdings and not updates %}
+    <div class="card">
+      <div class="card-title">暂无内容</div>
+      <p style="font-size:13px;color:#8a9199">今晚无持仓与调仓数据。</p>
+    </div>
+    {% endif %}
+
+    <div class="footer">雪球组合 Digest · 自动生成</div>
+  </div>
+</body>
+</html>

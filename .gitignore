@@ -1,5 +1,6 @@
 ### IDE ###
 .idea/
+*.iml
 .vscode/
 
 ### Python ###
@@ -20,5 +21,6 @@ data/xueqiu_cookie.txt
 
 ### Daily digest ###
 daily_digest_state.json
+digest_output/
 
 .DS_Store

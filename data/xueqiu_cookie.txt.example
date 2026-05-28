@@ -1,0 +1,2 @@
+# 从浏览器 F12 → Network → 任意 xueqiu.com 请求 → 复制 Cookie 整行粘贴到下一行
+# 或运行: cd backend && python ../scripts/xueqiu_login.py

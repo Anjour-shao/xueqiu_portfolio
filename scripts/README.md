@@ -13,5 +13,6 @@
 | `sync_quotes.py` | 同步持仓标的后复权行情 + 基准指数（含涨跌幅） | 看板 / 也可在前端「数据同步」页触发 |
 | `sync_tushare_aux.py` | TuShare 复权因子与基准（需 Token，可选） | 新浪不够时手动 |
 | `backtest_copy_portfolios.py` | 抄作业回测 CLI，结果输出到 `scripts/backtest_output/` | 命令行回测 |
+| `preview_latest_rebalance.py` | 本地预览：真实组合最新调仓 + 持仓 → `digest_output/` PNG | Digest 排版调试 |
 
 已删除的冗余脚本：`xueqiu_api_probe.py`（与 test 重复）、`sina_hfq_cli.py`（调试用）、`recompute_all.py`（看板每次请求会重算）。
