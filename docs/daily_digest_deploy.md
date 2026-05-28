@@ -41,12 +41,13 @@ python daily_portfolio_digest.py
 
 勿提交 state 到 Git。
 
-## GitHub Actions（推荐首选）
+## GitHub Actions
 
 Workflow：`.github/workflows/daily_digest.yml`
 
-- 定时：每天 **21:03**（`Asia/Shanghai`；若 schedule 仍不触发，用 `scripts/trigger_github_workflow.ps1` + 本机计划任务）
-- 手动：仓库 **Actions** → **Daily Portfolio Digest** → **Run workflow**
+- **手动**：仓库 **Actions** → **Daily Portfolio Digest** → **Run workflow**
+- **自动（推荐）**：本机 **Windows 计划任务** 每天 21:00 调 API 触发（见下方「schedule 不可用时的做法」）
+- **GHA 内置 schedule**：仓库若从未出现 **Scheduled** 运行，不要依赖 `cron`（见下方说明）
 
 ### Secrets（Settings → Secrets and variables → Actions）
 
@@ -87,6 +88,35 @@ Windows **任务计划程序**：每天 **21:00** 运行上述脚本。
 Digest 已支持 `repository_dispatch`（`run_digest`），与 API 触发等效。
 
 验证完请 **删除** `schedule_smoke_test.yml`，避免占 Actions 分钟数。
+
+### schedule 不可用时的做法（已确认 push 能跑、Scheduled 从不出现时）
+
+说明：**脚本在 GitHub 上能跑**，只是 **GitHub 不会按 cron 自动触发**。改公开库也**不一定**解决，需先在 Actions 里 Enable workflow；若仍无 Scheduled，用下面方案。
+
+**一次性准备**
+
+1. GitHub → **Settings** → **Developer settings** → **Personal access tokens** → **Generate new token (classic)**  
+   - 勾选 **repo**（或 Fine-grained：该仓库 **Actions: Read and write**）
+2. Windows：**设置** → **系统** → **关于** → **高级系统设置** → **环境变量** → 用户变量 **新建**  
+   - 名称 `GITHUB_TOKEN`，值 `ghp_...`
+
+**注册每天 21:00 自动触发（推荐）**
+
+```powershell
+cd C:\Users\邵俊杰\Desktop\web\xueqiu
+.\scripts\install_digest_scheduled_task.ps1
+# 立即试跑：
+Start-ScheduledTask -TaskName XueqiuDailyDigest
+```
+
+然后打开 [Actions](https://github.com/Anjour-shao/xueqiu_portfolio/actions)，应出现新的 **Daily Portfolio Digest**（由 API 触发，事件可能显示为 `workflow_dispatch`）。
+
+仅单次测试、不装计划任务时：
+
+```powershell
+$env:GITHUB_TOKEN = "ghp_..."
+.\scripts\trigger_github_workflow.ps1
+```
 
 ### 私有库 vs 公开库（schedule）
 
