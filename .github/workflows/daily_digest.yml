@@ -2,10 +2,13 @@ name: Daily Portfolio Digest
 
 on:
   schedule:
-    # 北京时间 晚上 21:00（9 点）
-    - cron: "0 21 * * *"
+    # 北京时间 21:03（避开整点队列高峰，GitHub 可能延迟或丢 21:00 的 schedule）
+    - cron: "3 21 * * *"
       timezone: Asia/Shanghai
   workflow_dispatch:
+  # 可由 scripts/trigger_github_workflow.* + 本机计划任务 / 外部 cron 调用 API 触发
+  repository_dispatch:
+    types: [run_digest]
 
 jobs:
   digest:

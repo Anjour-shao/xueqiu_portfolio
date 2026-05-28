@@ -45,7 +45,7 @@ python daily_portfolio_digest.py
 
 Workflow：`.github/workflows/daily_digest.yml`
 
-- 定时：每天 **21:00**（`Asia/Shanghai`，晚上 9 点）
+- 定时：每天 **21:03**（`Asia/Shanghai`；若 schedule 仍不触发，用 `scripts/trigger_github_workflow.ps1` + 本机计划任务）
 - 手动：仓库 **Actions** → **Daily Portfolio Digest** → **Run workflow**
 
 ### Secrets（Settings → Secrets and variables → Actions）
@@ -57,19 +57,48 @@ Workflow：`.github/workflows/daily_digest.yml`
 | `DINGTALK_WEBHOOK` | 钉钉机器人 Webhook |
 | `DEEPSEEK_BASE_URL` | 可选，默认 `https://api.deepseek.com` |
 
-### 验证「定时触发」是否正常（Schedule Smoke Test）
+### 若 schedule 从不触发（只能手动 Run workflow）
 
-若 **Daily Portfolio Digest** 只能手动跑、从未出现 **Scheduled**，可先推送并启用：
+GitHub 对**私有库**可能**不跑 schedule**（工作流被暂停、账户/组织策略、或整点队列被丢弃）。表现：Smoke Test 推送后 15+ 分钟仍无 **Scheduled** 记录。
 
-- Workflow：`.github/workflows/schedule_smoke_test.yml`
-- 每 **5 分钟** 跑一次（`Asia/Shanghai`），仅打印时间与 `github.event_name`
-- 在 Actions → **Schedule Smoke Test** 中：
-  - 先 **Run workflow** 确认手动 OK
-  - 再等 5～15 分钟，看是否出现事件类型为 **Scheduled** 的绿色 run
-  - 日志里 `RESULT=OK — 定时触发成功` 表示平台定时正常
-- **验证完请删除该 workflow 文件**，避免无意义占 Actions 分钟数
+**请逐项检查（浏览器）：**
 
-若 Smoke Test 也无 Scheduled：Actions 页检查是否有「定时工作流已禁用」横幅并点 **Enable workflow**。
+1. 打开  
+   `https://github.com/Anjour-shao/xueqiu_portfolio/actions/workflows/schedule_smoke_test.yml`  
+   - 顶部黄色条 **「此计划任务工作流已被禁用」** → 点 **Enable workflow**
+2. 左侧 **Daily Portfolio Digest** → 右侧 `⋯` → 必须是 **Enable workflow**（不能是灰色 Disable）
+3. **Settings** → **Actions** → **General** → **Actions permissions** 选 **Allow all actions**
+
+**Schedule Smoke Test**（`.github/workflows/schedule_smoke_test.yml`）：
+
+- `push` 到 main 后会立刻有一条 **push** 触发（证明 workflow 在仓库里）
+- `schedule` 在 **3/13/23/33/43/53 分** 尝试触发；若仍无 **Scheduled**，可认定平台 schedule 对你仓库不可用
+
+**可靠替代：本机/外部定时调 API（推荐）**
+
+不依赖 GitHub schedule，用 PAT 调 `workflow_dispatch`：
+
+```powershell
+$env:GITHUB_TOKEN = "ghp_你的token"
+.\scripts\trigger_github_workflow.ps1
+```
+
+Windows **任务计划程序**：每天 **21:00** 运行上述脚本。  
+Digest 已支持 `repository_dispatch`（`run_digest`），与 API 触发等效。
+
+验证完请 **删除** `schedule_smoke_test.yml`，避免占 Actions 分钟数。
+
+### 私有库 vs 公开库（schedule）
+
+| | 私有库 | 公开库 |
+|---|--------|--------|
+| 能否用 `schedule` | 可以 | 可以 |
+| 常见拦路虎 | Actions 里 **定时工作流被禁用**、组织策略 | 同上；另 **60 天无提交** 会暂停公开库的 schedule |
+| 与手动 Run 关系 | 手动能跑 ≠ schedule 已启用 | 相同 |
+
+**改公开库通常不能自动修好 schedule**，仍需在 Actions 里 **Enable workflow**。公开的主要差别是部分账户/组织策略更宽松，但不是万能药。
+
+**改公开前必读：** [`daily_portfolio_digest.py`](../daily_portfolio_digest.py) 里硬编码了 **持仓、成本、总资产、关注组合**（已在 Git 历史里）。公开后全世界可见；Secrets（Cookie、钉钉）仍在 GitHub Secrets 里，不会随仓库公开。若要坚持公开，应先把持仓/账户迁到私有配置或环境变量，并避免把真实数据写进仓库。
 
 ### 验证雪球在海外节点是否可用
 

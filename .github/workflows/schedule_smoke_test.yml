@@ -1,11 +1,14 @@
-# 用于验证 GitHub Actions「定时触发」是否正常（与 Digest 业务无关）。
-# 验证完成后请删除本文件，或去掉 schedule 仅保留 workflow_dispatch。
+# 验证 GitHub「schedule 定时」是否对该仓库生效。验证完请删除本文件。
 name: Schedule Smoke Test
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/schedule_smoke_test.yml
   schedule:
-    # 每 5 分钟一次（GitHub cron 最小粒度为 5 分钟）
-    - cron: "*/5 * * * *"
+    # 避开整点/每 5 分高峰（GitHub 可能丢队列），用 3/13/23/33/43/53 分
+    - cron: "3,13,23,33,43,53 * * * *"
       timezone: Asia/Shanghai
   workflow_dispatch:
 
@@ -24,11 +27,10 @@ jobs:
           echo "github.workflow=${{ github.workflow }}"
           echo "github.ref=${{ github.ref }}"
           echo "github.sha=${{ github.sha }}"
-          echo "runner.os=$(uname -a)"
           echo "beijing_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %Z')"
           echo "utc_time=$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "RESULT=OK — 定时触发成功"
-          else
-            echo "RESULT=手动触发（workflow_dispatch）"
-          fi
+          case "${{ github.event_name }}" in
+            schedule) echo "RESULT=OK — 定时 schedule 已触发" ;;
+            push) echo "RESULT=push 触发（说明 workflow 已在 main，仅 schedule 可能仍被禁用）" ;;
+            *) echo "RESULT=手动 workflow_dispatch" ;;
+          esac
