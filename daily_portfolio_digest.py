@@ -973,7 +973,7 @@ def _build_watch_summary(updates: list[PortfolioUpdate]) -> dict[str, Any] | Non
     return {
         "count": len(items),
         "new_count": len(updates),
-        "items": items,
+        "portfolios": items,
     }
 
 

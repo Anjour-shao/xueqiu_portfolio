@@ -2,8 +2,8 @@ name: Daily Portfolio Digest
 
 on:
   schedule:
-    # UTC 0:00 = 北京时间 8:00（夏令时期间若差 1 小时可改为 0 1 * * *）
-    - cron: "0 0 * * *"
+    # UTC 12:30 = 北京时间 20:30（晚上 8 点半）
+    - cron: "30 12 * * *"
   workflow_dispatch:
 
 jobs:

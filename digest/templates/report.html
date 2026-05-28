@@ -360,7 +360,7 @@
         <p class="rb-empty-title">今晚无新调仓</p>
         <p>已巡检 {{ watch_summary.count }} 个关注组合，自上次推送以来均无新变化。</p>
         <div class="watch-grid">
-          {% for w in watch_summary.items %}
+          {% for w in watch_summary.portfolios %}
           <div class="watch-item">
             <span class="watch-name">{{ w.name }}</span>
             <span class="watch-id">{{ w.id }}</span>
