@@ -1,14 +1,12 @@
 name: Daily Portfolio Digest
 
 on:
-  schedule:
-    # 北京时间 21:03（避开整点队列高峰，GitHub 可能延迟或丢 21:00 的 schedule）
-    - cron: "3 21 * * *"
-      timezone: Asia/Shanghai
   workflow_dispatch:
-  # 可由 scripts/trigger_github_workflow.* + 本机计划任务 / 外部 cron 调用 API 触发
   repository_dispatch:
     types: [run_digest]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   digest:
@@ -55,7 +53,7 @@ jobs:
           python daily_portfolio_digest.py
 
       - name: Save digest state
-        if: always()
+        if: always() && hashFiles('daily_digest_state.json') != ''
         uses: actions/cache/save@v4
         with:
           path: daily_digest_state.json

@@ -123,8 +123,6 @@ from xueqiu.integrations.xueqiu.portfolio import (
 )
 from xueqiu.integrations.xueqiu.posts import fetch_stock_posts
 
-from digest.state_store import load_state_json, save_state_json, state_backend
-
 _SINA_SPOT_HEADERS = {
     "Referer": "https://finance.sina.com.cn/",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -212,34 +210,13 @@ def _empty_state() -> dict[str, Any]:
 
 
 def load_state() -> dict[str, Any]:
-    if state_backend() != "file":
-        try:
-            raw = load_state_json()
-        except Exception as exc:
-            print(f"读取状态（{state_backend()}）失败，将使用空状态: {exc}")
-            return _empty_state()
-        if raw is None:
-            return _empty_state()
-    elif not STATE_FILE.exists():
+    if not STATE_FILE.exists():
         return _empty_state()
-    else:
-        try:
-            raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            print(f"读取状态文件失败，将使用空状态: {exc}")
-            return _empty_state()
     try:
-        pass
+        raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
-        print(f"读取状态失败，将使用空状态: {exc}")
+        print(f"读取状态文件失败，将使用空状态: {exc}")
         return _empty_state()
-
-    if state_backend() == "file":
-        try:
-            raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            print(f"读取状态文件失败，将使用空状态: {exc}")
-            return _empty_state()
 
     if not isinstance(raw, dict):
         return _empty_state()
