@@ -149,3 +149,12 @@ python ../scripts/backtest_copy_portfolios.py
 | POST | `/api/sync-xueqiu-all` | 雪球全量抓取 |
 | POST | `/api/import-logs` | 导入调仓日志 |
 | POST | `/api/recompute/{account_key}` | 重算收益 |
+
+## 每日组合 Digest（GitHub Actions）
+
+每晚 8 点推送关注组合调仓 + 个人持仓行情，见 [docs/DIGEST_GITHUB_SETUP.md](docs/DIGEST_GITHUB_SETUP.md)。
+
+```bash
+python daily_portfolio_digest.py --init-state   # 首次上云前
+python daily_portfolio_digest.py
+```
