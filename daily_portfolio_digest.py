@@ -1189,48 +1189,52 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
     state = load_state()
     updates: list[PortfolioUpdate] = []
     ai_budget = [MAX_AI_CALLS_PER_RUN]
-
-    if not skip_portfolios and WATCH_PORTFOLIOS:
-        client = XueQiuApiClient()
-        portfolios = [p.strip().upper() for p in WATCH_PORTFOLIOS if p.strip()]
-        total = len(portfolios)
-        for index, pid in enumerate(portfolios, 1):
-            upd = check_portfolio_for_nightly_digest(
-                client, pid, state, ai_budget=ai_budget
-            )
-            if upd is not None:
-                updates.append(upd)
-            if index < total:
-                time.sleep(random.uniform(1.0, 2.0))
-        if ai_budget[0] < MAX_AI_CALLS_PER_RUN:
-            used = MAX_AI_CALLS_PER_RUN - ai_budget[0]
-            print(f"\n本 run 已调用 DeepSeek {used} 次（上限 {MAX_AI_CALLS_PER_RUN}）。")
-    elif skip_portfolios:
-        print("已跳过组合调仓巡检（--holdings-only）。")
-
-    state["last_digest_at"] = run_time
-
     quotes: list[HoldingQuote] | None = None
     account_summary: AccountSummary | None = None
-    if MY_HOLDINGS and (ALWAYS_SEND_HOLDINGS or updates):
-        print("\n拉取个人持仓行情（现价 + 后复权）…")
-        quotes = fetch_holding_quotes(MY_HOLDINGS, state=state)
-        account_summary = build_account_summary(quotes, state)
-        update_holdings_state(state, quotes, account_summary)
 
-    save_state(state)
+    try:
+        if not skip_portfolios and WATCH_PORTFOLIOS:
+            client = XueQiuApiClient()
+            portfolios = [p.strip().upper() for p in WATCH_PORTFOLIOS if p.strip()]
+            total = len(portfolios)
+            for index, pid in enumerate(portfolios, 1):
+                upd = check_portfolio_for_nightly_digest(
+                    client, pid, state, ai_budget=ai_budget
+                )
+                if upd is not None:
+                    updates.append(upd)
+                if index < total:
+                    time.sleep(random.uniform(1.0, 2.0))
+            if ai_budget[0] < MAX_AI_CALLS_PER_RUN:
+                used = MAX_AI_CALLS_PER_RUN - ai_budget[0]
+                print(f"\n本 run 已调用 DeepSeek {used} 次（上限 {MAX_AI_CALLS_PER_RUN}）。")
+        elif skip_portfolios:
+            print("已跳过组合调仓巡检（--holdings-only）。")
 
-    should_send = bool(updates) or (ALWAYS_SEND_HOLDINGS and bool(MY_HOLDINGS))
-    if should_send:
-        send_dingtalk_digest(
-            run_time=run_time,
-            account=account_summary,
-            quotes=quotes,
-            updates=updates,
-            force_markdown=force_markdown,
-        )
-    else:
-        print("今晚无调仓待推送且未开启持仓推送，跳过钉钉。")
+        state["last_digest_at"] = run_time
+
+        if MY_HOLDINGS and (ALWAYS_SEND_HOLDINGS or updates):
+            print("\n拉取个人持仓行情（现价 + 后复权）…")
+            quotes = fetch_holding_quotes(MY_HOLDINGS, state=state)
+            account_summary = build_account_summary(quotes, state)
+            update_holdings_state(state, quotes, account_summary)
+
+        should_send = bool(updates) or (ALWAYS_SEND_HOLDINGS and bool(MY_HOLDINGS))
+        if should_send:
+            send_dingtalk_digest(
+                run_time=run_time,
+                account=account_summary,
+                quotes=quotes,
+                updates=updates,
+                force_markdown=force_markdown,
+            )
+        else:
+            print("今晚无调仓待推送且未开启持仓推送，跳过钉钉。")
+    finally:
+        try:
+            save_state(state)
+        except OSError as exc:
+            print(f"保存 state 失败: {exc}")
 
     print("=== 执行完毕 ===")
 

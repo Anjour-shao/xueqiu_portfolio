@@ -17,6 +17,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Restore digest state
+        id: cache_state
         uses: actions/cache@v4
         with:
           path: daily_digest_state.json
@@ -37,7 +38,7 @@ jobs:
           fc-cache -f
           python -m pip install --upgrade pip
           pip install -r daily_digest_requirements.txt
-          playwright install chromium
+          playwright install --with-deps chromium
 
       - name: Run daily digest
         env:
@@ -49,12 +50,6 @@ jobs:
           IMG_BB_API_KEY: ${{ secrets.IMG_BB_API_KEY }}
           DIGEST_PUSH_MODE: image
         run: |
+          set -euo pipefail
           export DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
           python daily_portfolio_digest.py
-
-      - name: Save digest state
-        if: always() && hashFiles('daily_digest_state.json') != ''
-        uses: actions/cache/save@v4
-        with:
-          path: daily_digest_state.json
-          key: daily-digest-state-v3
