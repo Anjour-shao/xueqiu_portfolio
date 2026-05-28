@@ -191,6 +191,46 @@
       color: #b0b8c0;
       margin-top: 4px;
     }
+    .rb-empty {
+      font-size: 12px;
+      color: #5c6570;
+      line-height: 1.6;
+    }
+    .rb-empty-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #1a1a1a;
+      margin-bottom: 8px;
+    }
+    .watch-grid {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px 8px;
+    }
+    .watch-item {
+      background: #f7f9fc;
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-size: 10px;
+    }
+    .watch-name {
+      display: block;
+      font-weight: 600;
+      color: #1a1a1a;
+      font-size: 11px;
+    }
+    .watch-id { color: #8a9199; }
+    .watch-tag {
+      display: inline-block;
+      margin-top: 3px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 9px;
+      font-weight: 600;
+    }
+    .watch-tag.new { background: #fde8e8; color: #e54545; }
+    .watch-tag.ok { background: #e8f5ee; color: #14a85c; }
   </style>
 </head>
 <body>
@@ -283,9 +323,10 @@
     </div>
     {% endif %}
 
-    {% if updates %}
+    {% if updates or watch_summary %}
     <div class="card">
       <div class="card-title">组合调仓</div>
+      {% if updates %}
       {% for upd in updates %}
       <div class="rebalance-block">
         <div class="rb-portfolio">{{ upd.portfolio_name }}</div>
@@ -314,10 +355,29 @@
         {% endfor %}
       </div>
       {% endfor %}
+      {% elif watch_summary %}
+      <div class="rb-empty">
+        <p class="rb-empty-title">今晚无新调仓</p>
+        <p>已巡检 {{ watch_summary.count }} 个关注组合，自上次推送以来均无新变化。</p>
+        <div class="watch-grid">
+          {% for w in watch_summary.items %}
+          <div class="watch-item">
+            <span class="watch-name">{{ w.name }}</span>
+            <span class="watch-id">{{ w.id }}</span>
+            {% if w.has_update %}
+            <span class="watch-tag new">有更新</span>
+            {% else %}
+            <span class="watch-tag ok">无更新</span>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
     </div>
     {% endif %}
 
-  {% if not account and not holdings and not updates %}
+  {% if not account and not holdings and not updates and not watch_summary %}
     <div class="card">
       <div class="card-title">暂无内容</div>
       <p style="font-size:13px;color:#8a9199">今晚无持仓与调仓数据。</p>

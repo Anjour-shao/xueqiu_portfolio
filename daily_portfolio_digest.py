@@ -957,6 +957,26 @@ def _digest_push_title(updates: list[PortfolioUpdate]) -> str:
     return f"组合调仓 · {names}"
 
 
+def _build_watch_summary(updates: list[PortfolioUpdate]) -> dict[str, Any] | None:
+    pids = [p.strip().upper() for p in WATCH_PORTFOLIOS if p.strip()]
+    if not pids:
+        return None
+    updated_ids = {u.portfolio_id for u in updates}
+    items = [
+        {
+            "id": pid,
+            "name": PORTFOLIO_NAMES.get(pid, pid),
+            "has_update": pid in updated_ids,
+        }
+        for pid in pids
+    ]
+    return {
+        "count": len(items),
+        "new_count": len(updates),
+        "items": items,
+    }
+
+
 def send_dingtalk_digest(
     *,
     run_time: str,
@@ -969,6 +989,7 @@ def send_dingtalk_digest(
     from digest import render as digest_render
 
     updates = updates or []
+    watch_summary = _build_watch_summary(updates)
     title = _digest_push_title(updates)
     simulate_note = f"模拟 {TEST_SIMULATE_NOW}" if TEST_SIMULATE_NOW else ""
     push_mode = digest_render.DIGEST_PUSH_MODE or "image"
@@ -981,6 +1002,7 @@ def send_dingtalk_digest(
                 account=account,
                 quotes=quotes,
                 updates=updates,
+                watch_summary=watch_summary,
                 title=title,
             )
             if ok and push_mode == "image":
@@ -1015,6 +1037,16 @@ def send_dingtalk_digest(
         for upd in updates:
             md_parts.append(_portfolio_update_markdown(upd).rstrip())
             md_parts.append("")
+    elif watch_summary:
+        md_parts.append("---")
+        md_parts.append("")
+        md_parts.append("### 🔔 组合调仓")
+        md_parts.append("")
+        if watch_summary["new_count"] == 0:
+            md_parts.append(
+                f"今晚无新调仓（已巡检 {watch_summary['count']} 个关注组合）。"
+            )
+        md_parts.append("")
     elif not holdings_md:
         md_parts.append("今晚无持仓配置且无待推送的调仓。")
 

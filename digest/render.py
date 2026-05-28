@@ -79,6 +79,7 @@ def build_report_context(
     account: Any | None = None,
     quotes: list[Any] | None = None,
     updates: list[Any] | None = None,
+    watch_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ctx: dict[str, Any] = {
         "title": "每日组合简报",
@@ -87,6 +88,7 @@ def build_report_context(
         "account": None,
         "holdings": [],
         "updates": [],
+        "watch_summary": watch_summary,
     }
 
     if account is not None:
@@ -361,6 +363,7 @@ def push_digest_image(
     account: Any | None = None,
     quotes: list[Any] | None = None,
     updates: list[Any] | None = None,
+    watch_summary: dict[str, Any] | None = None,
     title: str = "每日组合",
 ) -> tuple[bool, Path | None]:
     context = build_report_context(
@@ -369,6 +372,7 @@ def push_digest_image(
         account=account,
         quotes=quotes,
         updates=updates,
+        watch_summary=watch_summary,
     )
     html = render_report_html(context)
     safe_time = re.sub(r"[^\d]", "", run_time)[:12] or "digest"
@@ -391,6 +395,8 @@ def push_digest_image(
         if len(updates) > 2:
             names += f" 等{len(updates)}个"
         caption += f"\n\n组合调仓: {names}"
+    elif watch_summary and watch_summary.get("count"):
+        caption += f"\n\n组合调仓: 今晚无新调仓（已巡检 {watch_summary['count']} 个）"
 
     ok = send_dingtalk_image(title, image_url, caption=caption)
     return ok, out_path
