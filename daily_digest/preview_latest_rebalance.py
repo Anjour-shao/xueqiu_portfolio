@@ -7,16 +7,17 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent
+REPO_ROOT = ROOT.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-if str(ROOT / "backend") not in sys.path:
-    sys.path.insert(0, str(ROOT / "backend"))
+if str(REPO_ROOT / "backend") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "backend"))
 
 from dotenv import load_dotenv
 
-load_dotenv(ROOT / "backend" / ".env")
-load_dotenv(ROOT / ".env")
+load_dotenv(REPO_ROOT / "backend" / ".env")
+load_dotenv(REPO_ROOT / ".env")
 if not os.getenv("ACCOUNT_DASHBOARD_DATABASE_URL", "").strip():
     os.environ["ACCOUNT_DASHBOARD_DATABASE_URL"] = "sqlite:///:memory:"
 

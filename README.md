@@ -7,13 +7,10 @@
 ```
 xueqiu/
 ├── README.md
-├── daily_portfolio_digest.py      # 每晚 Digest 入口（GHA）
-├── daily_digest_requirements.txt
-├── digest/                        # HTML → 图片 → 钉钉
+├── daily_digest/                  # 云端每日 Digest（GHA，见 daily_digest/README.md）
 ├── sql/                           # 数据库脚本
 ├── scripts/                       # 命令行运维（见 scripts/README.md）
 │   ├── xueqiu_login.py            # 扫码写 Cookie
-│   ├── test_xueqiu_api.py         # API 连通性测试
 │   ├── xueqiu_monitor.py          # 调仓巡检 + 钉钉 + DeepSeek
 │   ├── sync_cube_nav.py           # 官方日净值同步
 │   ├── sync_quotes.py             # 后复权行情同步
@@ -111,10 +108,6 @@ npm run dev
 ```bash
 cd backend
 
-# API 连通性测试（个股讨论 + 用户发言）
-python ../scripts/test_xueqiu_api.py
-python ../scripts/test_xueqiu_api.py --portfolio ZH3207026
-
 # 调仓巡检
 python ../scripts/xueqiu_monitor.py
 
@@ -155,17 +148,6 @@ python ../scripts/backtest_copy_portfolios.py
 
 ## 每日组合 Digest（GitHub Actions）
 
-每晚 8 点推送关注组合调仓 + 个人持仓行情（HTML 渲染为图片 → 钉钉）。
+云端独立模块，每晚推送关注组合调仓 + 个人持仓（HTML → 图片 → 钉钉）。
 
-```
-daily_portfolio_digest.py      # 入口（GHA 调用）
-daily_digest_requirements.txt
-digest/
-  render.py                    # HTML → PNG → 图床 → 钉钉
-  templates/report.html
-scripts/preview_latest_rebalance.py   # 本地预览真实调仓排版
-docs/DIGEST_GITHUB_SETUP.md    # 部署与 Secrets 清单
-.github/workflows/daily_digest.yml
-```
-
-配置与上线步骤见 [docs/DIGEST_GITHUB_SETUP.md](docs/DIGEST_GITHUB_SETUP.md)。
+配置与部署见 [daily_digest/README.md](daily_digest/README.md)。

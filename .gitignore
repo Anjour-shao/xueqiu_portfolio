@@ -20,7 +20,7 @@ frontend/tsconfig.tsbuildinfo
 data/xueqiu_cookie.txt
 
 ### Daily digest ###
-daily_digest_state.json
-digest_output/
+daily_digest/daily_digest_state.json
+daily_digest/digest_output/
 
 .DS_Store

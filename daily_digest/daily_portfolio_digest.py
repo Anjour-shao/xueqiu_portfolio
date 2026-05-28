@@ -89,7 +89,7 @@ STATE_VERSION = 3
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent
-BACKEND = ROOT / "backend"
+BACKEND = ROOT.parent / "backend"
 STATE_FILE = Path(os.getenv("DIGEST_STATE_FILE", str(ROOT / "daily_digest_state.json")))
 
 if str(BACKEND) not in sys.path:
@@ -98,7 +98,7 @@ if str(BACKEND) not in sys.path:
 from dotenv import load_dotenv
 
 load_dotenv(BACKEND / ".env")
-load_dotenv(ROOT / ".env")
+load_dotenv(ROOT.parent / ".env")
 if not os.getenv("ACCOUNT_DASHBOARD_DATABASE_URL", "").strip():
     os.environ["ACCOUNT_DASHBOARD_DATABASE_URL"] = "sqlite:///:memory:"
 
@@ -1011,7 +1011,7 @@ def send_dingtalk_digest(
                 print("      图片已推送，继续发送 Markdown 摘要…")
             elif local_path:
                 print(f"      图床未配置或上传失败，已生成本地预览: {local_path}")
-                print("      建议在 .env 配置 IMG_BB_API_KEY 后重试（见 docs/DIGEST_GITHUB_SETUP.md）")
+                print("      建议在 .env 配置 IMG_BB_API_KEY 后重试（见 daily_digest/README.md）")
         except Exception as exc:
             print(f"      图片简报失败，回退 Markdown: {exc}")
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 用 GitHub API 触发 Actions（不依赖 schedule）
 # export GITHUB_TOKEN=ghp_xxxx
-# ./scripts/trigger_github_workflow.sh [workflow_file] [ref]
+# ./daily_digest/trigger_github_workflow.sh [workflow_file] [ref]
 
 set -euo pipefail
 REPO="${GITHUB_REPO:-Anjour-shao/xueqiu_portfolio}"

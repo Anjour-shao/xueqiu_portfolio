@@ -353,7 +353,7 @@ def sync_benchmark_from_sina(
     try:
         filtered = fetch_index_closes_robust(ts_code, start_date=start_date, end_date=end_date)
     except RuntimeError as exc:
-        msg = f"新浪基准失败: {exc}（应急可运行 python scripts/sync_benchmark.py）"
+        msg = f"新浪基准失败: {exc}（应急可运行 python scripts/sync_tushare_aux.py --benchmark-only）"
         if log_sink:
             log_sink.error(msg)
         else:

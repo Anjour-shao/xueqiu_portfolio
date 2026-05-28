@@ -1,8 +1,8 @@
 # 用 GitHub API 手动/定时触发 Actions（不依赖仓库内 schedule）。
 # 用法：
 #   $env:GITHUB_TOKEN = "ghp_xxxx"   # Classic PAT：勾选 repo；或 Fine-grained：Actions Read/Write
-#   .\scripts\trigger_github_workflow.ps1
-#   .\scripts\trigger_github_workflow.ps1 -WorkflowFile schedule_smoke_test.yml
+#   .\daily_digest\trigger_github_workflow.ps1
+#   .\daily_digest\trigger_github_workflow.ps1 -WorkflowFile schedule_smoke_test.yml
 #
 # Windows 计划任务：每天 21:00 执行本脚本，等效于「定时 Digest」。
 

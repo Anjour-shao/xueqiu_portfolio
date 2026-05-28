@@ -3,7 +3,7 @@
 #
 # 用法（管理员不必，普通用户即可）：
 #   $env:GITHUB_TOKEN = "ghp_xxxx"
-#   .\scripts\install_digest_scheduled_task.ps1
+#   .\daily_digest\install_digest_scheduled_task.ps1
 # 删除：Unregister-ScheduledTask -TaskName "XueqiuDailyDigest" -Confirm:$false
 
 param(
@@ -19,7 +19,7 @@ if (-not $token) {
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$triggerScript = Join-Path $repoRoot "scripts\trigger_github_workflow.ps1"
+$triggerScript = Join-Path $repoRoot "daily_digest\trigger_github_workflow.ps1"
 if (-not (Test-Path $triggerScript)) {
     Write-Error "找不到 $triggerScript"
     exit 1

@@ -20,9 +20,10 @@ jobs:
         id: cache_state
         uses: actions/cache@v4
         with:
-          path: daily_digest_state.json
-          key: daily-digest-state-v3
+          path: daily_digest/daily_digest_state.json
+          key: daily-digest-state-v4
           restore-keys: |
+            daily-digest-state-v4
             daily-digest-state-v3
             daily-digest-state-v1
 
@@ -37,7 +38,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends fonts-noto-cjk
           fc-cache -f
           python -m pip install --upgrade pip
-          pip install -r daily_digest_requirements.txt
+          pip install -r daily_digest/requirements.txt
           playwright install --with-deps chromium
 
       - name: Run daily digest
@@ -52,4 +53,4 @@ jobs:
         run: |
           set -euo pipefail
           export DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
-          python daily_portfolio_digest.py
+          python daily_digest/daily_portfolio_digest.py
