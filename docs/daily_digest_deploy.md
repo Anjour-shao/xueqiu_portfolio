@@ -57,6 +57,20 @@ Workflow：`.github/workflows/daily_digest.yml`
 | `DINGTALK_WEBHOOK` | 钉钉机器人 Webhook |
 | `DEEPSEEK_BASE_URL` | 可选，默认 `https://api.deepseek.com` |
 
+### 验证「定时触发」是否正常（Schedule Smoke Test）
+
+若 **Daily Portfolio Digest** 只能手动跑、从未出现 **Scheduled**，可先推送并启用：
+
+- Workflow：`.github/workflows/schedule_smoke_test.yml`
+- 每 **5 分钟** 跑一次（`Asia/Shanghai`），仅打印时间与 `github.event_name`
+- 在 Actions → **Schedule Smoke Test** 中：
+  - 先 **Run workflow** 确认手动 OK
+  - 再等 5～15 分钟，看是否出现事件类型为 **Scheduled** 的绿色 run
+  - 日志里 `RESULT=OK — 定时触发成功` 表示平台定时正常
+- **验证完请删除该 workflow 文件**，避免无意义占 Actions 分钟数
+
+若 Smoke Test 也无 Scheduled：Actions 页检查是否有「定时工作流已禁用」横幅并点 **Enable workflow**。
+
 ### 验证雪球在海外节点是否可用
 
 1. 配置好 Secrets 后，手动触发 **workflow_dispatch**。
