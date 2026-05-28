@@ -69,11 +69,12 @@ MY_ACCOUNT: dict[str, Any] = {
     "total_assets": 59092.58,
 }
 
+# holding_days：与雪球账本「持股天数」一致；也可用 opened_at: "2026-05-16" 自动推算
 MY_HOLDINGS: list[dict[str, Any]] = [
-    {"code": "003043", "name": "华亚智能", "shares": 300, "cost_price": 62.03},
-    {"code": "600184", "name": "光电股份", "shares": 100, "cost_price": 30.94},
-    {"code": "002466", "name": "天齐锂业", "shares": 200, "cost_price": 80.94},
-    {"code": "600522", "name": "中天科技", "shares": 200, "cost_price": 25.48},
+    {"code": "003043", "name": "华亚智能", "shares": 300, "cost_price": 62.03, "holding_days": 12},
+    {"code": "600184", "name": "光电股份", "shares": 100, "cost_price": 30.94, "holding_days": 12},
+    {"code": "002466", "name": "天齐锂业", "shares": 200, "cost_price": 80.94, "holding_days": 17},
+    {"code": "600522", "name": "中天科技", "shares": 200, "cost_price": 25.48, "holding_days": 17},
 ]
 
 ALWAYS_SEND_HOLDINGS = True
@@ -85,6 +86,10 @@ COMMENT_MAX_PAGES = 3
 
 # 回溯调仓历史页数（防同日多批漏报）
 REBALANCE_HISTORY_PAGES = 5
+# 每晚每组合最多处理几批调仓（同日多批合并时截断）
+MAX_BATCHES_PER_PORTFOLIO = 3
+# 单次运行最多调用 DeepSeek 次数（防首次未 init-state 爆量）
+MAX_AI_CALLS_PER_RUN = 8
 
 # 测试：模拟「今晚 8 点」的时间点，仅用于调仓新旧对比；测完务必改回 None
 TEST_SIMULATE_NOW: str | None = None
@@ -175,6 +180,8 @@ class HoldingQuote:
     hfq_price: float | None = None
     hfq_cost: float | None = None
     hfq_pnl_pct: float | None = None
+    holding_days: int | None = None
+    weight_pct: float | None = None
     error: str = ""
 
 
@@ -389,7 +396,16 @@ def fetch_rebalances_since(
 ) -> list[dict[str, Any]]:
     """拉取 (since_time, as_of] 区间内所有手动调仓批次（时间升序）。"""
     pid = validate_portfolio_id(portfolio_id)
-    since_dt = _parse_rebalance_dt(since_time) if since_time else datetime.min
+
+    # 从未推送过：只认最新一批，避免把 2023 年起全部历史当「新调仓」
+    if not since_time:
+        try:
+            latest = fetch_portfolio_rebalance(pid, client=client)
+            return [latest]
+        except Exception:
+            return []
+
+    since_dt = _parse_rebalance_dt(since_time)
     as_of_dt = as_of or _now()
     portfolio_name = _fetch_portfolio_name(client, pid)
 
@@ -465,27 +481,74 @@ def _float_cfg(item: dict[str, Any], key: str) -> float | None:
         return None
 
 
-def fetch_holding_quotes(holdings: list[dict[str, Any]]) -> list[HoldingQuote]:
+def _int_cfg(item: dict[str, Any], key: str) -> int | None:
+    raw = item.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_holding_days(
+    item: dict[str, Any],
+    code: str,
+    state: dict[str, Any],
+) -> int | None:
+    days = _int_cfg(item, "holding_days")
+    if days is not None and days >= 0:
+        return days
+    opened = str(item.get("opened_at") or "").strip()
+    if opened:
+        try:
+            opened_date = datetime.strptime(opened[:10], "%Y-%m-%d").date()
+            return max(0, (_now().date() - opened_date).days)
+        except ValueError:
+            pass
+    hist = (state.get("holdings") or {}).get(code) or {}
+    return _int_cfg(hist, "holding_days")
+
+
+def _apply_holding_weights(quotes: list[HoldingQuote]) -> None:
+    total_mv = sum(q.market_value or 0.0 for q in quotes if q.market_value)
+    if total_mv <= 0:
+        return
+    for q in quotes:
+        if q.market_value is not None and q.weight_pct is None:
+            q.weight_pct = round(q.market_value / total_mv * 100, 2)
+
+
+def fetch_holding_quotes(
+    holdings: list[dict[str, Any]],
+    *,
+    state: dict[str, Any] | None = None,
+) -> list[HoldingQuote]:
     if not holdings:
         return []
 
+    state = state or {}
     results: list[HoldingQuote] = []
-    entries: list[tuple[str, str, str, float | None, float | None]] = []
+    entries: list[tuple[str, str, str, float | None, float | None, int | None, float | None]] = []
     for item in holdings:
         raw_code = str(item.get("code", "")).strip()
         name = str(item.get("name", raw_code)).strip()
         cost = _float_cfg(item, "cost_price")
         shares = _float_cfg(item, "shares")
+        weight_pct = _float_cfg(item, "weight_pct")
         if not raw_code:
             continue
         try:
             code = normalize_stock_code(raw_code)
-            entries.append((code, name, _code_to_sinajs_symbol(code), cost, shares))
+            holding_days = _resolve_holding_days(item, code, state)
+            entries.append(
+                (code, name, _code_to_sinajs_symbol(code), cost, shares, holding_days, weight_pct)
+            )
         except ValueError as exc:
-            print(f"      跳过无效持仓代码 {code}: {exc}")
+            print(f"      跳过无效持仓代码 {raw_code}: {exc}")
             results.append(
                 HoldingQuote(
-                    code=code.upper(),
+                    code=raw_code.upper(),
                     name=name,
                     price=None,
                     change_pct=None,
@@ -514,7 +577,7 @@ def fetch_holding_quotes(holdings: list[dict[str, Any]]) -> list[HoldingQuote]:
             quotes_by_symbol[sym] = _parse_sinajs_line(line)
     except Exception as exc:
         print(f"      新浪行情请求失败: {exc}")
-        for code, name, _, cost, shares in entries:
+        for code, name, _, cost, shares, hd, wp in entries:
             results.append(
                 HoldingQuote(
                     code=code,
@@ -523,12 +586,14 @@ def fetch_holding_quotes(holdings: list[dict[str, Any]]) -> list[HoldingQuote]:
                     change_pct=None,
                     cost_price=cost,
                     shares=shares,
+                    holding_days=hd,
+                    weight_pct=wp,
                     error=str(exc),
                 )
             )
         return results
 
-    for code, name, sina_sym, cost, shares in entries:
+    for code, name, sina_sym, cost, shares, holding_days, weight_pct in entries:
         current, pre_close = quotes_by_symbol.get(sina_sym, (None, None))
         if current is None or pre_close is None:
             results.append(
@@ -539,6 +604,8 @@ def fetch_holding_quotes(holdings: list[dict[str, Any]]) -> list[HoldingQuote]:
                     change_pct=None,
                     cost_price=cost,
                     shares=shares,
+                    holding_days=holding_days,
+                    weight_pct=weight_pct,
                     error="无行情数据",
                 )
             )
@@ -578,8 +645,11 @@ def fetch_holding_quotes(holdings: list[dict[str, Any]]) -> list[HoldingQuote]:
                 hfq_price=hfq_price,
                 hfq_cost=hfq_cost,
                 hfq_pnl_pct=hfq_pnl_pct,
+                holding_days=holding_days,
+                weight_pct=weight_pct,
             )
         )
+    _apply_holding_weights(results)
     return results
 
 
@@ -651,6 +721,8 @@ def update_holdings_state(
             "hfq_price": q.hfq_price,
             "hfq_cost": q.hfq_cost,
             "hfq_pnl_pct": q.hfq_pnl_pct,
+            "holding_days": q.holding_days,
+            "weight_pct": q.weight_pct,
             "updated_at": _now().strftime("%Y-%m-%d %H:%M:%S"),
         }
     if account.total_assets is not None:
@@ -680,66 +752,133 @@ def _fmt_money(amount: float | None) -> str:
     return f"{sign}{amount:,.2f}"
 
 
+def _fmt_money_plain(amount: float | None) -> str:
+    if amount is None:
+        return "-"
+    return f"{amount:,.2f}"
+
+
+def _trend_tag(pct: float | None) -> str:
+    if pct is None:
+        return "·"
+    if pct > 0:
+        return "涨"
+    if pct < 0:
+        return "跌"
+    return "平"
+
+
 def _holdings_markdown(quotes: list[HoldingQuote], account: AccountSummary) -> str:
     if not quotes:
         return ""
-    lines = [f"### 个人持仓 · {account.name}", ""]
+
+    lines = [
+        f"### 💼 {account.name}",
+        "",
+        "#### 账户概览",
+        "",
+    ]
     if account.total_assets is not None:
         d_pct = _fmt_pct(account.daily_pnl_pct) if account.daily_pnl_pct is not None else "-"
         h_pct = _fmt_pct(account.holding_pnl_pct) if account.holding_pnl_pct is not None else "-"
-        lines.append(
-            f"- **总资产** {account.total_assets:,.2f}（市值 {account.market_value:,.2f}"
-            + (f" + 现金 {account.cash:,.2f}" if account.cash is not None else "")
-            + "）"
+        overview = [
+            f"- 总资产 **{_fmt_money_plain(account.total_assets)}**",
+            f"- 市值 **{_fmt_money_plain(account.market_value)}**",
+        ]
+        if account.cash is not None:
+            overview.append(f"- 现金 **{_fmt_money_plain(account.cash)}**")
+        overview.extend(
+            [
+                f"- 当日盈亏 **{_fmt_money(account.daily_pnl)}**（{d_pct}）",
+                f"- 持有盈亏 **{_fmt_money(account.holding_pnl)}**（{h_pct}）",
+                "",
+            ]
         )
-        lines.append(
-            f"- **当日盈亏** {_fmt_money(account.daily_pnl)}（{d_pct}）"
-            f" · **持有盈亏** {_fmt_money(account.holding_pnl)}（{h_pct}）"
-        )
-        lines.append("")
-    for q in quotes:
-        if q.error:
-            lines.append(f"- **{q.name}** ({q.code})：{q.error}")
-            continue
-        price_str = f"{q.price:.2f}" if q.price is not None else "-"
-        sh = f"{int(q.shares)}股 " if q.shares else ""
-        day_part = f"今日 {_fmt_pct(q.change_pct)}"
-        if q.daily_pnl_amount is not None:
-            day_part += f"（{_fmt_money(q.daily_pnl_amount)}）"
-        if q.unrealized_pnl_pct is not None:
-            pnl_part = f"持仓 {_fmt_pct(q.unrealized_pnl_pct)}"
-            if q.unrealized_pnl_amount is not None:
-                pnl_part += f" {_fmt_money(q.unrealized_pnl_amount)}"
-            if q.hfq_pnl_pct is not None:
-                pnl_part += f" · 后复权 {_fmt_pct(q.hfq_pnl_pct)}"
-            lines.append(f"- **{q.name}** {sh}({q.code})：{price_str}，{day_part}，{pnl_part}")
-        else:
-            lines.append(f"- **{q.name}** {sh}({q.code})：{price_str}，{day_part}")
+        lines.extend(overview)
+
+    sorted_quotes = sorted(
+        quotes,
+        key=lambda q: (q.weight_pct is None, -(q.weight_pct or 0)),
+    )
+    lines.append(f"#### 持仓明细（{len(sorted_quotes)} 只）")
     lines.append("")
+
+    for idx, q in enumerate(sorted_quotes, 1):
+        if q.error:
+            lines.append(f"**{idx}. {q.name}** `{q.code}`  \n{q.error}")
+            lines.append("")
+            continue
+
+        meta_parts: list[str] = []
+        if q.holding_days is not None:
+            meta_parts.append(f"持股 **{q.holding_days}** 天")
+        if q.shares:
+            meta_parts.append(f"**{int(q.shares)}** 股")
+        if q.weight_pct is not None:
+            meta_parts.append(f"仓位 **{q.weight_pct:.1f}%**")
+        meta_line = " · ".join(meta_parts) if meta_parts else ""
+
+        price_str = f"{q.price:.2f}" if q.price is not None else "-"
+        day_line = f"今日 {_trend_tag(q.change_pct)} **{_fmt_pct(q.change_pct)}**"
+        if q.daily_pnl_amount is not None:
+            day_line += f"（{_fmt_money(q.daily_pnl_amount)}）"
+
+        lines.append(f"**{idx}. {q.name}** `{q.code}`")
+        if meta_line:
+            lines.append(f"> {meta_line}")
+        lines.append(f"> 现价 **{price_str}** · {day_line}")
+
+        if q.unrealized_pnl_pct is not None:
+            pnl_line = f"> 持仓盈亏 **{_fmt_pct(q.unrealized_pnl_pct)}**"
+            if q.unrealized_pnl_amount is not None:
+                pnl_line += f"（{_fmt_money(q.unrealized_pnl_amount)}）"
+            if q.hfq_pnl_pct is not None:
+                pnl_line += f" · 后复权 {_fmt_pct(q.hfq_pnl_pct)}"
+            lines.append(pnl_line)
+        lines.append("")
+
     return "\n".join(lines)
+
+
+def _truncate_ai_text(text: str, limit: int = 420) -> str:
+    compact = re.sub(r"\n{3,}", "\n\n", text.strip())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip() + "…"
 
 
 def _portfolio_update_markdown(update: PortfolioUpdate) -> str:
     batch_count = len(update.batches)
-    md = f"### 组合调仓 · {update.portfolio_name}"
+    title = f"### 📌 {update.portfolio_name}"
     if batch_count > 1:
-        md += f"（今晚共 {batch_count} 批）"
-    md += "\n\n"
-    md += f"**组合 ID：** {update.portfolio_id}\n\n"
+        title += f"（{batch_count} 批）"
+    lines = [
+        title,
+        "",
+        f"> 组合 `{update.portfolio_id}`",
+        "",
+    ]
 
     for batch in update.batches:
-        md += f"#### 调仓时间 {batch.rebalance_time}\n\n"
+        lines.append(f"#### 🕐 {batch.rebalance_time}")
+        lines.append("")
         for item in batch.records:
-            action = item.get("action", "")
-            md += f"- **{action}** {item.get('name', '')} ({item.get('code', '')})"
-            md += f" · {item.get('price', '-')} · {item.get('weight_change', '-')}\n"
+            action = str(item.get("action", ""))
+            icon = "【买】" if action == "买入" else "【卖】" if action == "卖出" else "·"
+            name = item.get("name", "")
             code = item.get("code", "")
+            lines.append(
+                f"- {icon} **{action}** {name} `{code}`  \n"
+                f"  {item.get('price', '-')} · {item.get('weight_change', '-')}"
+            )
             if action == "买入" and code in batch.ai_summaries:
-                summary_lines = batch.ai_summaries[code].split("\n")
-                formatted = "\n> ".join(summary_lines)
-                md += f"\n> **DeepSeek 舆情**\n>\n> {formatted}\n"
-        md += "\n"
-    return md
+                summary = _truncate_ai_text(batch.ai_summaries[code])
+                summary_lines = summary.split("\n")
+                quoted = "\n> ".join(summary_lines)
+                lines.append(f"\n> **AI 舆情**  \n> {quoted}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 def _apply_dingtalk_keyword(text: str) -> str:
@@ -826,20 +965,35 @@ def send_dingtalk_digest(
     updates: list[PortfolioUpdate],
     run_time: str,
 ) -> None:
-    mode = f"（模拟截至 {TEST_SIMULATE_NOW}）" if TEST_SIMULATE_NOW else ""
-    md_text = f"## 每日组合简报{mode}\n\n**运行时间：** {run_time}\n\n"
+    mode = f" · 模拟 {TEST_SIMULATE_NOW}" if TEST_SIMULATE_NOW else ""
+    md_parts = [
+        f"## 📊 每日组合简报{mode}",
+        "",
+        f"> {run_time}",
+        "",
+    ]
     if holdings_md:
-        md_text += holdings_md + "\n"
+        md_parts.append(holdings_md.rstrip())
+        md_parts.append("")
     if updates:
-        md_text += "---\n\n"
+        md_parts.append("---")
+        md_parts.append("")
+        md_parts.append("### 🔔 组合调仓")
+        md_parts.append("")
         for upd in updates:
-            md_text += _portfolio_update_markdown(upd)
+            md_parts.append(_portfolio_update_markdown(upd).rstrip())
+            md_parts.append("")
     elif not holdings_md:
-        md_text += "今晚无持仓配置且无待推送的调仓。\n"
+        md_parts.append("今晚无持仓配置且无待推送的调仓。")
+
+    md_text = "\n".join(md_parts).rstrip() + "\n"
 
     title = "每日组合"
     if updates:
-        title = f"组合调仓 {len(updates)} 个"
+        names = "、".join(u.portfolio_name for u in updates[:2])
+        if len(updates) > 2:
+            names += f" 等{len(updates)}个"
+        title = f"组合调仓 · {names}"
 
     send_dingtalk_markdown(title, md_text)
 
@@ -903,6 +1057,8 @@ def check_portfolio_for_nightly_digest(
     client: XueQiuApiClient,
     portfolio_id: str,
     state: dict[str, Any],
+    *,
+    ai_budget: list[int],
 ) -> PortfolioUpdate | None:
     pid = portfolio_id.strip().upper()
     last_notified = _portfolio_last_notified(state, pid)
@@ -921,6 +1077,14 @@ def check_portfolio_for_nightly_digest(
     if not new_batches_raw:
         print(f"[{pid}] 该时段无新调仓。")
         return None
+
+    if len(new_batches_raw) > MAX_BATCHES_PER_PORTFOLIO:
+        trimmed = new_batches_raw[-MAX_BATCHES_PER_PORTFOLIO:]
+        print(
+            f"[{pid}] 调仓批次数 {len(new_batches_raw)} 过多，"
+            f"仅处理最近 {MAX_BATCHES_PER_PORTFOLIO} 批"
+        )
+        new_batches_raw = trimmed
 
     portfolio_name = PORTFOLIO_NAMES.get(pid) or new_batches_raw[-1].get("portfolio_name") or pid
     times = [b["rebalance_time"] for b in new_batches_raw]
@@ -943,8 +1107,12 @@ def check_portfolio_for_nightly_digest(
                 continue
             buy_codes_seen.add(code)
             stock_name = record.get("name", code)
+            if ai_budget[0] <= 0:
+                ai_summaries[code] = "（本 run 已达 DeepSeek 调用上限，已跳过）"
+                continue
             print(f"      分析买入: {stock_name} ({code})")
             comments = fetch_stock_comments(client, code)
+            ai_budget[0] -= 1
             ai_summaries[code] = call_deepseek_summary(
                 str(stock_name), comments, verbose=True
             )
@@ -966,10 +1134,34 @@ def check_portfolio_for_nightly_digest(
     )
 
 
-def main() -> None:
+def run_holdings_only() -> None:
+    """仅推送个人持仓行情，不扫组合、不调 DeepSeek。"""
+    run_time = _now().strftime("%Y-%m-%d %H:%M")
+    print(f"=== 仅持仓简报 ({run_time}) ===")
+    if not MY_HOLDINGS:
+        print("未配置 MY_HOLDINGS。")
+        return
+    state = load_state()
+    quotes = fetch_holding_quotes(MY_HOLDINGS, state=state)
+    account_summary = build_account_summary(quotes, state)
+    update_holdings_state(state, quotes, account_summary)
+    save_state(state)
+    run_time = _now().strftime("%Y-%m-%d %H:%M")
+    holdings_md = _holdings_markdown(quotes, account_summary)
+    send_dingtalk_markdown(
+        "每日组合",
+        f"## 📊 持仓简报\n\n> {run_time}\n\n{holdings_md}",
+    )
+    print("=== 执行完毕 ===")
+
+
+def main(*, skip_portfolios: bool = False) -> None:
     run_time = _now().strftime("%Y-%m-%d %H:%M")
     sim_note = f" [模拟时间，TEST_SIMULATE_NOW={TEST_SIMULATE_NOW}]" if TEST_SIMULATE_NOW else ""
     print(f"=== 每日组合 Digest ({run_time}){sim_note} ===")
+
+    base_url = (DEEPSEEK_BASE_URL or "https://api.deepseek.com").strip()
+    print(f"DeepSeek: {base_url}")
 
     if not WATCH_PORTFOLIOS and not MY_HOLDINGS:
         print("请在脚本顶部配置 WATCH_PORTFOLIOS 或 MY_HOLDINGS。")
@@ -977,23 +1169,32 @@ def main() -> None:
 
     state = load_state()
     updates: list[PortfolioUpdate] = []
+    ai_budget = [MAX_AI_CALLS_PER_RUN]
 
-    client = XueQiuApiClient()
-    portfolios = [p.strip().upper() for p in WATCH_PORTFOLIOS if p.strip()]
-    total = len(portfolios)
-    for index, pid in enumerate(portfolios, 1):
-        upd = check_portfolio_for_nightly_digest(client, pid, state)
-        if upd is not None:
-            updates.append(upd)
-        if index < total:
-            time.sleep(random.uniform(1.0, 2.0))
+    if not skip_portfolios and WATCH_PORTFOLIOS:
+        client = XueQiuApiClient()
+        portfolios = [p.strip().upper() for p in WATCH_PORTFOLIOS if p.strip()]
+        total = len(portfolios)
+        for index, pid in enumerate(portfolios, 1):
+            upd = check_portfolio_for_nightly_digest(
+                client, pid, state, ai_budget=ai_budget
+            )
+            if upd is not None:
+                updates.append(upd)
+            if index < total:
+                time.sleep(random.uniform(1.0, 2.0))
+        if ai_budget[0] < MAX_AI_CALLS_PER_RUN:
+            used = MAX_AI_CALLS_PER_RUN - ai_budget[0]
+            print(f"\n本 run 已调用 DeepSeek {used} 次（上限 {MAX_AI_CALLS_PER_RUN}）。")
+    elif skip_portfolios:
+        print("已跳过组合调仓巡检（--holdings-only）。")
 
     state["last_digest_at"] = run_time
 
     holdings_md = ""
     if MY_HOLDINGS and (ALWAYS_SEND_HOLDINGS or updates):
         print("\n拉取个人持仓行情（现价 + 后复权）…")
-        quotes = fetch_holding_quotes(MY_HOLDINGS)
+        quotes = fetch_holding_quotes(MY_HOLDINGS, state=state)
         account_summary = build_account_summary(quotes, state)
         update_holdings_state(state, quotes, account_summary)
         holdings_md = _holdings_markdown(quotes, account_summary)
@@ -1021,10 +1222,17 @@ if __name__ == "__main__":
         action="store_true",
         help="仅同步各组合最新调仓时间到 state，不推送",
     )
+    parser.add_argument(
+        "--holdings-only",
+        action="store_true",
+        help="仅推送个人持仓，不扫组合、不调 AI",
+    )
     args = parser.parse_args()
     if args.test_one:
         run_test_one_stock()
     elif args.init_state:
         init_portfolio_state_only()
+    elif args.holdings_only:
+        run_holdings_only()
     else:
-        main()
+        main(skip_portfolios=False)

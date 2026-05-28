@@ -67,11 +67,30 @@ git push origin main
 | `DINGTALK_WEBHOOK` | 钉钉机器人 Webhook 完整 URL |
 | `DINGTALK_KEYWORD` | `组合`（与机器人安全设置一致） |
 
-## 五、首次在云端运行
+## 五、首次在云端运行（重要）
 
-1. 打开 **Actions** → **Daily Portfolio Digest** → **Run workflow**。
-2. 查看日志：持仓行情、组合巡检、DeepSeek、钉钉 `errcode=0`。
-3. **首次**若未在本地执行 `--init-state`，可能推送较多历史调仓；可在本地跑 `--init-state` 后把生成的 `daily_digest_state.json` 交给 cache（或再手动 Run 一次后 cache 会自动带上）。
+**务必先在本地执行一次初始化，否则会把 2023 年起所有历史调仓当新消息：**
+
+```bash
+python daily_portfolio_digest.py --init-state
+```
+
+然后把 `daily_digest_state.json` 提交到私有分支或仅在本地保留；更稳妥是本地 `--init-state` 后，在 GitHub 第一次 Run 前用 workflow 只跑持仓：
+
+```bash
+python daily_portfolio_digest.py --holdings-only
+```
+
+### 终止正在跑的 Workflow
+
+GitHub 仓库 → **Actions** → 点进正在转圈的那次 **Daily Portfolio Digest** → 右上角 **Cancel workflow**。
+
+### 正常首次上线步骤
+
+1. 本地：`python daily_portfolio_digest.py --init-state`
+2. Actions → **Run workflow**（正式跑）
+3. 日志应出现 `DeepSeek: https://api.deepseek.com`（若显示 `base=` 为空，在 Secrets 补 `DEEPSEEK_BASE_URL` 或依赖脚本默认）
+4. 钉钉 `errcode=0`
 
 State 通过 Actions Cache（key: `daily-digest-state-v3`）在每日运行间保留。
 

@@ -29,6 +29,9 @@ DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "").strip()
 # 钉钉机器人若开启「自定义关键词」，每条消息正文须包含该词
 DINGTALK_KEYWORD = os.getenv("DINGTALK_KEYWORD", "").strip()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
+DEEPSEEK_BASE_URL = (
+    os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
+    or "https://api.deepseek.com"
+)
 
 COOKIE_FILE = PROJECT_ROOT / "data" / "xueqiu_cookie.txt"

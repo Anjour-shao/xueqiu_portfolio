@@ -40,7 +40,9 @@ jobs:
           DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
           DINGTALK_KEYWORD: ${{ secrets.DINGTALK_KEYWORD }}
-        run: python daily_portfolio_digest.py
+        run: |
+          export DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
+          python daily_portfolio_digest.py
 
       - name: Save digest state
         if: always()
