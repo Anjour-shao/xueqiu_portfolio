@@ -223,7 +223,8 @@ def render_html_to_png(html: str, out_path: Path) -> Path:
             device_scale_factor=2,
         )
         page.set_content(html, wait_until="load")
-        page.wait_for_timeout(200)
+        page.wait_for_function("() => document.fonts.ready")
+        page.wait_for_timeout(300)
         height = page.evaluate("() => Math.ceil(document.body.scrollHeight)")
         page.set_viewport_size({"width": 390, "height": max(height, 400)})
         page.screenshot(path=str(out_path), full_page=True, type="png")
