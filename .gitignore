@@ -1,0 +1,24 @@
+### IDE ###
+.idea/
+.vscode/
+
+### Python ###
+backend/.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+### Node ###
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+### Cookie ###
+data/xueqiu_cookie.txt
+
+### Daily digest ###
+daily_digest_state.json
+
+.DS_Store
