@@ -45,7 +45,7 @@ python daily_portfolio_digest.py
 
 Workflow：`.github/workflows/daily_digest.yml`
 
-- 定时：每天 UTC 12:30（北京时间 **晚上 20:30**）
+- 定时：每天 **21:00**（`Asia/Shanghai`，晚上 9 点）
 - 手动：仓库 **Actions** → **Daily Portfolio Digest** → **Run workflow**
 
 ### Secrets（Settings → Secrets and variables → Actions）
