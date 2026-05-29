@@ -271,7 +271,7 @@ def _upload_imgbb(path: Path) -> str:
     data = base64.b64encode(path.read_bytes()).decode("ascii")
     resp = requests.post(
         "https://api.imgbb.com/1/upload",
-        data={"key": IMG_BB_API_KEY, "image": data, "expiration": 600},
+        data={"key": IMG_BB_API_KEY, "image": data},
         timeout=90,
     )
     body = resp.json()
