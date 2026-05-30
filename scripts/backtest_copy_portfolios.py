@@ -61,7 +61,7 @@ def write_equity_csv(result: dict) -> Path:
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["trade_time", "total_nav", "cum_return_pct", "profit"],
+            fieldnames=["trade_time", "total_nav", "total_nav_hfq", "cum_return_pct", "profit", "profit_hfq"],
         )
         writer.writeheader()
         writer.writerows(result["equity_curve"])

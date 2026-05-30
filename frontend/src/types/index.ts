@@ -140,10 +140,59 @@ export interface PortfoliosOverviewStatsResponse {
 export interface CopyBacktestRequest {
   initial_capital: number;
   max_stock_pct: number;
-  star_unlock_profit: number;
-  lot_size: number;
   min_new_position_pct: number;
-  allow_star_market: boolean;
+  max_positions: number;
+  strategy_id?: string;
+  start_date?: string | null;
+  end_date?: string | null;
+}
+
+export interface StrategyCatalogItem {
+  id: string;
+  label: string;
+  description: string;
+  style: 'legacy' | 'aggressive' | 'momentum';
+}
+
+export interface StrategyCompareSummary {
+  strategy_id: string;
+  label: string;
+  description?: string;
+  style?: string;
+  return_pct: number | null;
+  return_since_entry?: number | null;
+  entry_date?: string | null;
+  return_since_2020: number | null;
+  return_since_2023: number | null;
+  max_drawdown_pct: number | null;
+  sharpe_proxy: number | null;
+  cash_pct: number | null;
+  position_count: number | null;
+  orphan_sell_count: number | null;
+  rotate_count: number | null;
+  rebalance_count: number | null;
+  final_nav_hfq: number | null;
+  current_leader?: string | null;
+  leader_switches?: number | null;
+}
+
+export interface EntrySweepItem {
+  date: string;
+  strategy_id: string;
+  label?: string | null;
+  return_pct: number | null;
+  max_drawdown_pct: number | null;
+  cash_pct: number | null;
+  position_count: number | null;
+}
+
+export interface StrategyCompareResponse {
+  initial_capital: number;
+  start_date?: string | null;
+  end_date?: string | null;
+  results: StrategyCompareSummary[];
+  consensus_stats: Record<string, unknown>;
+  entry_sweep?: EntrySweepItem[];
 }
 
 export interface PositionItem {
@@ -151,6 +200,8 @@ export interface PositionItem {
   stock_name: string;
   last_action: string;
   current_weight: number;
+  avg_cost?: number | null;
+  mark_price?: number | null;
   avg_cost_hfq: number | null;
   mark_price_hfq: number | null;
   return_pct: number | null;
@@ -204,6 +255,12 @@ export interface DashboardPayload {
   recent_trades: TradeItem[];
   grouped_stats: GroupedStatItem[];
   nav_source?: 'official' | 'pseudo';
+  backtest_meta?: {
+    strategy_id: string;
+    strategy_label?: string;
+    initial_capital: number;
+    entry_date?: string | null;
+  };
 }
 
 export interface ParsedTradeItem {
@@ -245,11 +302,36 @@ export interface SyncLogItem {
   message: string;
 }
 
-export interface CubeCatalogStats {
+export interface DiscoveryStats {
   total_count: number;
-  discovered_count: number;
-  remaining_count: number;
-  last_updated_at: string | null;
+  auto_pass_count: number;
+  pending_count: number;
+  selected_count: number;
+  rejected_count: number;
+  imported_count: number;
+}
+
+export interface MinedCubeItem {
+  account_code: string;
+  account_name: string;
+  owner_uid: number | null;
+  owner_name: string | null;
+  source_user_uid: number | null;
+  source_account_code: string | null;
+  depth: number;
+  cum_return_pct: number | null;
+  nav_latest_date: string | null;
+  latest_rebalance_time: string | null;
+  rebalance_count_6m: number | null;
+  cube_market: string | null;
+  has_non_a_share: boolean;
+  auto_pass: boolean;
+  reject_reasons: string[];
+  selected: number | null;
+  note: string | null;
+  imported_at: string | null;
+  first_seen_at: string | null;
+  updated_at: string | null;
 }
 
 export interface SyncTradeResultItem {
@@ -331,8 +413,10 @@ export interface CopyBacktestPosition {
   ts_code: string;
   stock_name: string;
   qty: number;
+  avg_cost?: number | null;
   mark_price: number;
   mark_price_hfq?: number | null;
+  return_pct?: number | null;
   value: number;
   weight_pct: number;
 }
@@ -352,6 +436,11 @@ export interface CopyBacktestTradeLog {
   our_weight_pct: number;
   nav_after: number;
   note?: string;
+  trigger?: string | null;
+  leg_return_pct?: number | null;
+  slice_qty_before?: number | null;
+  slice_qty_after?: number | null;
+  physical_qty?: number | null;
 }
 
 export interface CopyBacktestResponse {
@@ -373,81 +462,15 @@ export interface CopyBacktestResponse {
   skipped_small: number;
   trade_log_count: number;
   star_unlocked: boolean;
-  star_unlock_profit: number;
   max_stock_pct: number;
-  lot_size: number;
   min_new_position_pct: number;
-  allow_star_market?: boolean;
+  max_positions: number;
+  overview_win_rate?: number;
   source_stats: Record<string, number>;
   positions: CopyBacktestPosition[];
   equity_curve: CopyBacktestEquityPoint[];
   trade_logs: CopyBacktestTradeLog[];
-}
-
-export interface DiscoverPortfoliosParams {
-  scan_mode?: 'catalog' | 'random' | 'sequential';
-  batch_size?: number;
-  /** 留空本批数量时：连续多批直到停止 */
-  continuous?: boolean;
-  profiles?: string[];
-  max_rebalance_per_month?: number;
-  nav_threshold_5y?: number;
-  nav_threshold_10y?: number;
-  young_min_cum_pct?: number;
-  max_inactive_days?: number | null;
-  exclude_followed?: boolean;
-}
-
-export interface DiscoveredPortfolioItem {
-  account_code: string;
-  account_name: string;
-  latest_nav: number;
-  cum_return_pct: number;
-  latest_nav_date?: string | null;
-  latest_trade_time?: string | null;
-  already_followed?: boolean;
-  matched_profiles?: string[];
-  required_nav_threshold?: number | null;
-  inception_days?: number | null;
-  inception_years?: number | null;
-}
-
-export interface DiscoverPortfoliosResponse {
-  scanned: number;
-  matched_count: number;
-  not_found: number;
-  filtered_out: number;
-  items: DiscoveredPortfolioItem[];
-  scan_mode?: string | null;
-  catalog_pool_size?: number | null;
-  catalog_discovered_count?: number | null;
-  catalog_remaining_count?: number | null;
-  batch_start?: number | null;
-  batch_end?: number | null;
-  last_scanned_num?: number | null;
-  next_checkpoint?: number | null;
-}
-
-export type DiscoverLogLevel = 'info' | 'success' | 'warn' | 'error';
-
-export interface DiscoverLogItem {
-  level: DiscoverLogLevel;
-  message: string;
-}
-
-export type DiscoverStreamEvent =
-  | { type: 'progress'; current: number; total: number; code: string }
-  | { type: 'skip'; code: string; reason: string; preview?: DiscoveredPortfolioItem }
-  | { type: 'hit'; item: DiscoveredPortfolioItem }
-  | { type: 'log'; level?: DiscoverLogLevel; message: string }
-  | ({ type: 'done'; ok: boolean; message?: string } & Partial<DiscoverPortfoliosResponse>);
-
-export interface FollowPortfoliosResponse {
-  ok: boolean;
-  followed_count: number;
-  message: string;
-  account_codes: string[];
-  errors: string[];
+  grouped_stats?: GroupedStatItem[];
 }
 
 export interface DeleteAccountResponse {

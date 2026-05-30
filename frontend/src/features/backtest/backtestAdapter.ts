@@ -7,9 +7,11 @@ function mapPositions(result: CopyBacktestResponse): PositionItem[] {
     stock_name: p.stock_name,
     last_action: 'HOLD',
     current_weight: p.weight_pct,
-    avg_cost_hfq: p.mark_price_hfq ?? p.mark_price,
-    mark_price_hfq: p.mark_price_hfq ?? p.mark_price,
-    return_pct: null,
+    avg_cost: p.avg_cost ?? null,
+    mark_price: p.mark_price,
+    avg_cost_hfq: p.avg_cost ?? null,
+    mark_price_hfq: p.mark_price_hfq ?? null,
+    return_pct: p.return_pct ?? null,
     trade_count: 0,
     last_trade_time: null,
     is_holding: true,
@@ -17,53 +19,33 @@ function mapPositions(result: CopyBacktestResponse): PositionItem[] {
 }
 
 function mapTrades(result: CopyBacktestResponse): TradeItem[] {
-  return result.trade_logs.map((t, idx) => ({
-    id: idx + 1,
-    trade_time: t.trade_time,
-    stock_name: t.stock_name,
-    ts_code: t.ts_code,
-    action: t.action,
-    from_weight: typeof t.master_from === 'number' ? t.master_from : Number(t.master_from) || 0,
-    to_weight: typeof t.master_to === 'number' ? t.master_to : Number(t.master_to) || 0,
-    weight_delta: 0,
-    price: t.price,
-    price_hfq: t.price_hfq ?? null,
-    return_pct: null,
-    leg_return_pct: null,
-    account_contrib_pct: null,
-    nav_pre: t.nav_after,
-  }));
+  return result.trade_logs.map((t, idx) => {
+    const masterFrom = typeof t.master_from === 'number' ? t.master_from : Number(t.master_from) || 0;
+    const masterTo = typeof t.master_to === 'number' ? t.master_to : Number(t.master_to) || 0;
+    const useOurs = masterFrom === 0 && masterTo === 0 && (t.our_weight_pct ?? 0) > 0;
+    return {
+      id: idx + 1,
+      trade_time: t.trade_time,
+      stock_name: t.stock_name,
+      ts_code: t.ts_code,
+      action: t.action,
+      from_weight: useOurs ? 0 : masterFrom,
+      to_weight: useOurs ? (t.our_weight_pct ?? 0) : masterTo || masterFrom,
+      weight_delta: 0,
+      price: t.price,
+      price_hfq: t.price_hfq ?? null,
+      return_pct: t.leg_return_pct ?? null,
+      leg_return_pct: t.leg_return_pct ?? null,
+      account_contrib_pct: null,
+      nav_pre: t.nav_after,
+    };
+  });
 }
 
-function buildGroupedStats(trades: TradeItem[]): GroupedStatItem[] {
-  const byCode = new Map<string, TradeItem[]>();
-  for (const t of trades) {
-    const list = byCode.get(t.ts_code) ?? [];
-    list.push(t);
-    byCode.set(t.ts_code, list);
-  }
-  const rows: GroupedStatItem[] = [];
-  for (const [ts_code, list] of byCode) {
-    const sorted = [...list].sort((a, b) => a.trade_time.localeCompare(b.trade_time));
-    const last = sorted[sorted.length - 1];
-    rows.push({
-      ts_code,
-      stock_name: last.stock_name,
-      events: sorted.length,
-      realized_count: sorted.length,
-      wins: 0,
-      losses: 0,
-      win_rate: 0,
-      cum_return_pct: 0,
-      last_trade_time: last.trade_time,
-      holding_days: null,
-      is_holding: false,
-    });
-  }
-  return rows.sort((a, b) => b.realized_count - a.realized_count);
-}
-
-export function copyBacktestToDashboard(result: CopyBacktestResponse): DashboardPayload {
+export function copyBacktestToDashboard(
+  result: CopyBacktestResponse,
+  meta?: { strategy_id: string; strategy_label?: string; initial_capital: number; entry_date?: string | null },
+): DashboardPayload {
   const equity_curve: EquityPoint[] = result.equity_curve.map((p) => ({
     trade_date: p.trade_time.slice(0, 10),
     trade_time: p.trade_time,
@@ -86,13 +68,14 @@ export function copyBacktestToDashboard(result: CopyBacktestResponse): Dashboard
   const risk = computeRiskMetricsFromCurve(equity_curve);
   const positions = mapPositions(result);
   const recent_trades = mapTrades(result);
+  const grouped_stats: GroupedStatItem[] = result.grouped_stats ?? [];
 
   const overview: OverviewMetrics = {
     trade_count: result.trade_log_count,
     stock_count: new Set(recent_trades.map((t) => t.ts_code)).size,
-    realized_events: recent_trades.length,
-    win_rate: 0,
-    avg_trade_return_pct: 0,
+    realized_events: grouped_stats.reduce((s, g) => s + g.realized_count, 0),
+    win_rate: result.overview_win_rate ?? 0,
+    avg_trade_return_pct: result.overview_win_rate ?? 0,
     cum_return_pct: result.return_pct,
     realized_return_pct: result.return_pct_raw,
     unrealized_return_pct: 0,
@@ -108,12 +91,20 @@ export function copyBacktestToDashboard(result: CopyBacktestResponse): Dashboard
   };
 
   return {
-    account: '抄作业模拟',
+    account: meta?.entry_date ? `抄作业模拟 · 自${meta.entry_date}` : '抄作业模拟',
     overview,
     equity_curve,
     positions,
     recent_trades,
-    grouped_stats: buildGroupedStats(recent_trades),
+    grouped_stats,
     nav_source: 'official',
+    backtest_meta: meta
+      ? {
+          strategy_id: meta.strategy_id,
+          strategy_label: meta.strategy_label,
+          initial_capital: meta.initial_capital,
+          entry_date: meta.entry_date ?? null,
+        }
+      : undefined,
   };
 }

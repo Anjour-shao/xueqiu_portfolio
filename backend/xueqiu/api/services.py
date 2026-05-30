@@ -809,126 +809,6 @@ def get_portfolios_overview_stats() -> dict[str, Any]:
     return load_portfolios_overview_stats()
 
 
-def _discover_kwargs_from_params(params: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "scan_mode": str(params.get("scan_mode") or "catalog"),
-        "zh_num_lo": int(params.get("zh_num_lo") or 1_000_000),
-        "zh_num_hi": int(params.get("zh_num_hi") or 3_565_914),
-        "num_start": params.get("zh_num_start"),
-        "batch_size": params.get("batch_size"),
-        "end_goal": params.get("zh_num_end_goal"),
-        "num_min": params.get("zh_num_min"),
-        "num_max": params.get("zh_num_max"),
-        "step": int(params.get("step") or 1),
-        "max_scan": int(params.get("max_scan") or 80),
-        "profiles": params.get("profiles"),
-        "nav_at_5y": float(params.get("nav_threshold_5y") or 6.0),
-        "nav_at_10y": float(params.get("nav_threshold_10y") or 40.0),
-        "young_min_cum_pct": float(params.get("young_min_cum_pct") or 300.0),
-        "max_rebalance_per_month": int(params.get("max_rebalance_per_month") or 4),
-        "min_nav": params.get("min_nav"),
-        "min_cum_return_pct": params.get("min_cum_return_pct"),
-        "max_cum_return_pct": params.get("max_cum_return_pct"),
-        "max_inactive_days": params.get("max_inactive_days"),
-        "exclude_followed": bool(params.get("exclude_followed", True)),
-    }
-
-
-def discover_portfolios(**params: Any) -> dict[str, Any]:
-    from xueqiu.domain.portfolio_discover import run_portfolio_discover
-
-    return run_portfolio_discover(**_discover_kwargs_from_params(params))
-
-
-def iter_discover_portfolios_stream(params: dict[str, Any]):
-    import json
-    import queue
-    import threading
-
-    from xueqiu.domain.portfolio_discover import run_portfolio_discover
-
-    cancel = params.get("_cancel_event")
-    if cancel is not None and not isinstance(cancel, threading.Event):
-        cancel = None
-    event_queue: queue.Queue = queue.Queue()
-
-    def emit(item: dict[str, Any]) -> None:
-        event_queue.put(item)
-
-    def worker() -> None:
-        try:
-            result = run_portfolio_discover(
-                **_discover_kwargs_from_params(params),
-                emit=emit,
-                cancel_check=cancel.is_set if cancel else None,
-            )
-            event_queue.put({"type": "done", "ok": True, **result})
-        except Exception as exc:
-            event_queue.put({"type": "done", "ok": False, "message": str(exc)})
-        finally:
-            event_queue.put(None)
-
-    threading.Thread(target=worker, daemon=True).start()
-
-    while True:
-        if cancel is not None and cancel.is_set():
-            try:
-                while True:
-                    item = event_queue.get_nowait()
-                    if item is None:
-                        return
-                    yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-            except queue.Empty:
-                return
-        try:
-            item = event_queue.get(timeout=0.3)
-        except queue.Empty:
-            continue
-        if item is None:
-            break
-        yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-
-
-def follow_portfolios(account_codes: list[str], *, sync_after_follow: bool = False) -> dict[str, Any]:
-    from xueqiu.domain.portfolio_discover import probe_portfolio
-    from xueqiu.integrations.xueqiu.client import XueQiuApiClient
-    from xueqiu.integrations.xueqiu.portfolio import validate_portfolio_id
-
-    followed: list[str] = []
-    errors: list[str] = []
-    api = XueQiuApiClient()
-
-    for raw in account_codes:
-        try:
-            code = validate_portfolio_id(raw)
-            name = code
-            try:
-                info = probe_portfolio(code, api)
-                name = str(info["account_name"])
-            except Exception:
-                pass
-            upsert_account(code, name)
-            followed.append(code)
-            try:
-                sync_from_xueqiu(code)
-            except Exception as exc:
-                errors.append(f"{code}: {exc}")
-        except Exception as exc:
-            errors.append(f"{raw}: {exc}")
-
-    ok = not errors
-    msg = f"已关注 {len(followed)} 个组合"
-    if errors:
-        msg += f"，{len(errors)} 个失败"
-    return {
-        "ok": ok,
-        "followed_count": len(followed),
-        "message": msg,
-        "account_codes": followed,
-        "errors": errors,
-    }
-
-
 def sync_quotes_data(*, sink: Any | None = None, cancel_event: Any | None = None) -> dict[str, Any]:
     import threading
 
@@ -1042,34 +922,66 @@ def run_sync_all_pipeline(sink: Any, *, cancel_event: Any | None = None) -> dict
     return {"ok": ok, "xueqiu": xueqiu, "quotes": quotes, "cube_nav": cube}
 
 
-def get_cube_catalog_stats() -> dict[str, Any]:
-    from xueqiu.sync.sync_cube_catalog import catalog_stats
+def get_discovery_stats() -> dict[str, Any]:
+    from xueqiu.domain.discovery_store import get_discovery_stats
 
-    return catalog_stats()
+    return get_discovery_stats()
 
 
-def reset_cube_catalog_discovered() -> dict[str, Any]:
-    from xueqiu.sync.sync_cube_catalog import reset_catalog_discovered
+def list_discovery_cubes(
+    *,
+    auto_pass: bool | None = None,
+    selected: int | None = None,
+    depth: int | None = None,
+    q: str | None = None,
+) -> list[dict[str, Any]]:
+    from xueqiu.domain.discovery_store import list_mined_cubes
 
-    count = reset_catalog_discovered()
+    return list_mined_cubes(auto_pass=auto_pass, selected=selected, depth=depth, q=q)
+
+
+def patch_discovery_cube(
+    account_code: str,
+    *,
+    selected: int | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    from xueqiu.domain.discovery_store import update_mined_cube_selection
+
+    return update_mined_cube_selection(account_code, selected=selected, note=note)
+
+
+def import_discovery_cube(account_code: str) -> dict[str, Any]:
+    from xueqiu.domain.discovery_store import mark_mined_cube_imported, update_mined_cube_selection
+
+    code = account_code.strip().upper()
+    row = update_mined_cube_selection(code, selected=1)
+    if row.get("imported_at"):
+        return {
+            "ok": True,
+            "message": f"组合 {code} 已入库",
+            "account_code": code,
+            "sync": {},
+        }
+    sync_result = sync_from_xueqiu(code)
+    mark_mined_cube_imported(code)
     return {
-        "ok": True,
-        "message": f"已重置 {count} 条 catalog 的「已挖过」标记",
-        "reset_count": count,
+        "ok": bool(sync_result.get("ok", True)),
+        "message": str(sync_result.get("message") or "入库完成"),
+        "account_code": code,
+        "sync": sync_result,
     }
 
 
-def sync_cube_catalog_from_ranks_api(
-    *, sink: Any | None = None, cancel_event: Any | None = None
-) -> dict[str, Any]:
-    from xueqiu.sync.sync_cube_catalog import sync_cube_catalog_from_ranks
+def run_discovery_mine_api(*, max_depth: int = 1, sink: Any | None = None, cancel_event: Any | None = None) -> dict[str, Any]:
+    from xueqiu.domain.discovery_mine import run_discovery_mine
     from xueqiu.sync.sync_log import LogSink
 
     log_sink = sink if isinstance(sink, LogSink) else LogSink()
-    return sync_cube_catalog_from_ranks(sink=log_sink, cancel_event=cancel_event)
+    return run_discovery_mine(max_depth=max_depth, sink=log_sink, cancel_event=cancel_event)
 
 
-def iter_sync_cube_catalog_stream(cancel_event: Any | None = None):
+def iter_discovery_mine_stream(*, max_depth: int = 1, cancel_event: Any | None = None):
     import json
     import queue
     import threading
@@ -1086,9 +998,9 @@ def iter_sync_cube_catalog_stream(cancel_event: Any | None = None):
 
         sink = LogSink(emit=emit)
         try:
-            result = sync_cube_catalog_from_ranks_api(sink=sink, cancel_event=cancel)
+            result = run_discovery_mine_api(max_depth=max_depth, sink=sink, cancel_event=cancel)
             if cancel.is_set():
-                event_queue.put({"type": "done", "ok": False, "message": "用户已停止同步"})
+                event_queue.put({"type": "done", "ok": False, "message": "用户已停止挖掘"})
             else:
                 event_queue.put(
                     {
@@ -1098,10 +1010,10 @@ def iter_sync_cube_catalog_stream(cancel_event: Any | None = None):
                     }
                 )
         except SyncCancelled:
-            sink.warn("■ 榜单目录同步已停止")
-            event_queue.put({"type": "done", "ok": False, "message": "用户已停止同步"})
+            sink.warn("■ 挖组合已停止")
+            event_queue.put({"type": "done", "ok": False, "message": "用户已停止挖掘"})
         except Exception as exc:
-            sink.error(f"榜单目录同步中断: {exc}")
+            sink.error(f"挖组合中断: {exc}")
             event_queue.put({"type": "done", "ok": False, "message": str(exc)})
         finally:
             event_queue.put(None)
@@ -1182,22 +1094,46 @@ def iter_sync_all_stream(cancel_event: Any | None = None):
 
 def run_copy_backtest(
     *,
-    initial_capital: float = 100_000.0,
+    initial_capital: float = 1_000_000.0,
     max_stock_pct: float = 20.0,
-    star_unlock_profit: float = 500_000.0,
-    lot_size: int = 100,
     min_new_position_pct: float = 1.0,
-    allow_star_market: bool = False,
+    max_positions: int = 5,
+    strategy_id: str = "route_f_partition_mimic",
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[str, Any]:
-    from xueqiu.domain.copy_backtest import BacktestConfig, run_backtest
+    from xueqiu.domain.copy_strategies import (
+        StrategyId,
+        run_strategy,
+        strategy_to_backtest_response,
+    )
 
-    return run_backtest(
-        BacktestConfig(
-            initial_capital=initial_capital,
-            max_stock_pct=max_stock_pct / 100.0 if max_stock_pct > 1 else max_stock_pct,
-            star_unlock_profit=star_unlock_profit,
-            lot_size=lot_size,
-            min_new_position_pct=min_new_position_pct,
-            allow_star_market=allow_star_market,
-        )
+    sid = StrategyId(strategy_id)
+    return strategy_to_backtest_response(
+        run_strategy(sid, initial_capital=initial_capital, start_date=start_date, end_date=end_date)
+    )
+
+
+def list_backtest_strategies() -> list[dict[str, Any]]:
+    from xueqiu.domain.copy_strategies import list_strategy_catalog
+
+    return list_strategy_catalog()
+
+
+def compare_backtest_strategies(
+    *,
+    strategy_ids: list[str],
+    initial_capital: float = 1_000_000.0,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    entry_sweep_dates: list[str] | None = None,
+) -> dict[str, Any]:
+    from xueqiu.domain.copy_strategies import run_strategy_compare
+
+    return run_strategy_compare(
+        strategy_ids,
+        initial_capital=initial_capital,
+        start_date=start_date,
+        end_date=end_date,
+        entry_sweep_dates=entry_sweep_dates,
     )

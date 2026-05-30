@@ -6,31 +6,33 @@ import { stockUrl } from '../../lib/xueqiuLinks';
 import { TradeHistoryPopover } from './TradeHistoryPopover';
 import { actionLabel, DASHBOARD_THEME, fmtDateOnly, fmtHoldingDays, fmtPct, surfaceCardSx } from './utils';
 
+const DETAIL_TABLE_PROPS = { compact: true, dense: true, minWidth: 420 } as const;
+
 const POSITION_COLS: TableColumn[] = [
   { key: 'stock_name', label: '股票', sortable: true, width: '20%' },
-  { key: 'holding_days', label: '持仓时长', sortable: true, width: '16%' },
+  { key: 'holding_days', label: '持仓时长', sortable: true, width: '14%' },
   { key: 'current_weight', label: '仓位', sortable: true, width: '12%' },
-  { key: 'avg_cost_hfq', label: '成本', sortable: true, width: '14%' },
-  { key: 'mark_price_hfq', label: '现价', sortable: true, width: '14%' },
-  { key: 'return_pct', label: '浮动', sortable: true, width: '16%', clip: false },
+  { key: 'avg_cost', label: '成本', sortable: true, width: '14%', clip: false },
+  { key: 'mark_price', label: '现价', sortable: true, width: '14%', clip: false },
+  { key: 'return_pct', label: '浮动', sortable: true, width: '14%', clip: false },
 ];
 
 const TRADE_COLS: TableColumn[] = [
-  { key: 'trade_time', label: '日期', sortable: true, width: '18%' },
-  { key: 'stock_name', label: '股票', sortable: true, width: '20%' },
-  { key: 'action', label: '动作', width: '11%' },
-  { key: 'weight', label: '仓位', width: '16%' },
-  { key: 'price', label: '成交价', sortable: true, width: '15%' },
-  { key: 'return_pct', label: '收益', sortable: true, width: '20%', clip: false },
+  { key: 'trade_time', label: '日期', sortable: true, width: '20%', clip: false },
+  { key: 'stock_name', label: '股票', sortable: true, width: '18%' },
+  { key: 'action', label: '动作', width: '10%' },
+  { key: 'weight', label: '仓位', width: '14%' },
+  { key: 'price', label: '成交价', sortable: true, width: '16%', clip: false },
+  { key: 'return_pct', label: '收益', sortable: true, width: '22%', clip: false },
 ];
 
 const STOCK_COLS: TableColumn[] = [
   { key: 'stock_name', label: '股票', sortable: true, width: '20%' },
   { key: 'holding_days', label: '持仓时长', sortable: true, width: '16%' },
   { key: 'realized_count', label: '平仓', sortable: true, width: '10%' },
-  { key: 'win_rate', label: '胜率', sortable: true, width: '10%' },
+  { key: 'win_rate', label: '胜率', sortable: true, width: '12%', clip: false },
   { key: 'cum_return_pct', label: '累计收益', sortable: true, width: '18%', clip: false },
-  { key: 'last_trade_time', label: '最近调仓', sortable: true, width: '26%' },
+  { key: 'last_trade_time', label: '最近调仓', sortable: true, width: '24%', clip: false },
 ];
 
 function cmpNum(a: number | null | undefined, b: number | null | undefined) {
@@ -48,10 +50,10 @@ function sortPositions(items: PositionItem[], sort: TableSort) {
         return desc * a.stock_name.localeCompare(b.stock_name, 'zh-CN');
       case 'current_weight':
         return desc * (a.current_weight - b.current_weight);
-      case 'avg_cost_hfq':
-        return desc * cmpNum(a.avg_cost_hfq, b.avg_cost_hfq);
-      case 'mark_price_hfq':
-        return desc * cmpNum(a.mark_price_hfq, b.mark_price_hfq);
+      case 'avg_cost':
+        return desc * cmpNum(a.avg_cost ?? a.avg_cost_hfq, b.avg_cost ?? b.avg_cost_hfq);
+      case 'mark_price':
+        return desc * cmpNum(a.mark_price ?? a.mark_price_hfq, b.mark_price ?? b.mark_price_hfq);
       case 'return_pct':
         return desc * cmpNum(a.return_pct, b.return_pct);
       case 'holding_days':
@@ -112,8 +114,8 @@ function positionsRows(positions: PositionItem[]) {
     item.stock_name,
     fmtHoldingDays(item.holding_days, item.is_holding ?? true),
     `${item.current_weight.toFixed(1)}%`,
-    item.avg_cost_hfq?.toFixed(2) ?? '-',
-    item.mark_price_hfq?.toFixed(2) ?? '-',
+    (item.avg_cost ?? item.avg_cost_hfq)?.toFixed(2) ?? '-',
+    (item.mark_price ?? item.mark_price_hfq)?.toFixed(2) ?? '-',
     fmtPct(item.return_pct),
   ]);
 }
@@ -266,8 +268,7 @@ export function DetailDataPanel({
       <Box sx={{ flex: 1, minHeight: 0, minWidth: 0, overflow: 'auto', mt: 1 }}>
         {tab === 0 && (
           <DataTable
-            compact
-            dense
+            {...DETAIL_TABLE_PROPS}
             columns={POSITION_COLS}
             rows={positionsRows(sortedPositions)}
             sort={positionSort}
@@ -277,7 +278,7 @@ export function DetailDataPanel({
         )}
         {tab === 1 && (
           <DataTable
-            compact
+            {...DETAIL_TABLE_PROPS}
             columns={TRADE_COLS}
             rows={tradeRows(sortedTrades)}
             sort={tradeSort}
@@ -291,7 +292,7 @@ export function DetailDataPanel({
               点击股票名查看该股全部调仓记录
             </Typography>
             <DataTable
-              compact
+              {...DETAIL_TABLE_PROPS}
               columns={STOCK_COLS}
               rows={groupedRows(sortedGrouped)}
               sort={stockSort}

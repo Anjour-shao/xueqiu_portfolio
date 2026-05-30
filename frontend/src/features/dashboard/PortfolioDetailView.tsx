@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import type { DashboardPayload } from '../../types';
+import type { EntryPickConfig } from './EquityChart';
 import { DetailDataPanel } from './DetailDataPanel';
 import { PortfolioAnalyticsLayout } from './PortfolioAnalyticsLayout';
 import { PortfolioChartPanel } from './PortfolioChartPanel';
@@ -8,9 +9,10 @@ import { usePortfolioChartState } from './usePortfolioChartState';
 type Props = {
   dashboard: DashboardPayload;
   showBrushControls?: boolean;
+  entryPick?: EntryPickConfig;
 };
 
-export function PortfolioDetailView({ dashboard, showBrushControls = false }: Props) {
+export function PortfolioDetailView({ dashboard, showBrushControls = true, entryPick }: Props) {
   const chart = usePortfolioChartState();
 
   const livePositions = useMemo(
@@ -44,6 +46,7 @@ export function PortfolioDetailView({ dashboard, showBrushControls = false }: Pr
             chart.setCalendarMonth(m);
           }}
           showBrushControls={showBrushControls}
+          entryPick={entryPick}
         />
       }
       sidePanel={<DetailDataPanel dashboard={dashboard} livePositions={livePositions} allTrades={allTrades} />}

@@ -1,9 +1,10 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AppShell } from './AppShell';
 import { BacktestPage } from '../pages/BacktestPage';
-import { DiscoverPage } from '../pages/DiscoverPage';
+import { ComparePage } from '../pages/ComparePage';
 import { HoldingsPage } from '../pages/HoldingsPage';
 import { OverviewPage } from '../pages/OverviewPage';
+import { DiscoverPage } from '../pages/DiscoverPage';
 import { SyncDataPage } from '../pages/SyncDataPage';
 
 export default function App() {
@@ -14,8 +15,9 @@ export default function App() {
           <Route index element={<Navigate to="/overview" replace />} />
           <Route path="overview" element={<OverviewPage />} />
           <Route path="portfolio/:accountCode" element={<HoldingsPage />} />
-          <Route path="sync" element={<SyncDataPage />} />
           <Route path="discover" element={<DiscoverPage />} />
+          <Route path="sync" element={<SyncDataPage />} />
+          <Route path="compare" element={<ComparePage />} />
           <Route path="backtest" element={<BacktestPage />} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Route>

@@ -3,9 +3,9 @@ import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded';
 import { Box, IconButton, Stack, Typography } from '@mui/material';
 import { DASHBOARD_THEME } from './utils';
 import { formatYearMonth } from './calendarUtils';
+import type { CalendarGranularity } from './PnlCalendarView';
 
 export type ChartViewMode = 'line' | 'calendar';
-export type CalendarGranularity = 'month' | 'year';
 
 function SegmentedControl<T extends string>({
   value,
@@ -74,7 +74,7 @@ export function ChartViewToolbar({
   chartView,
   onChartViewChange,
   showCalendarToggle = true,
-  calendarGranularity = 'month',
+  calendarGranularity = 'day',
   onCalendarGranularityChange,
   calendarYear,
   calendarMonth,
@@ -84,26 +84,45 @@ export function ChartViewToolbar({
   const chartOptions: { value: ChartViewMode; label: string }[] = [{ value: 'line', label: '净值走势' }];
   if (showCalendarToggle) chartOptions.push({ value: 'calendar', label: '盈亏日历' });
 
+  const periodLabel =
+    calendarYear != null && calendarMonth != null
+      ? calendarGranularity === 'year'
+        ? '历年收益'
+        : calendarGranularity === 'month'
+          ? `${calendarYear}年`
+          : formatYearMonth(calendarYear, calendarMonth)
+      : '';
+
+  const showNav = calendarGranularity !== 'year';
+
   return (
     <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1.5} sx={{ mb: 1.5, flexShrink: 0 }}>
       <SegmentedControl value={chartView} options={chartOptions} onChange={onChartViewChange} />
 
       {chartView === 'calendar' && showCalendarToggle && calendarYear != null && calendarMonth != null && (
         <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
-          <Stack direction="row" alignItems="center" spacing={0.25}>
-            <IconButton size="small" onClick={onCalendarPrev} aria-label="上一期">
-              <ChevronLeftRoundedIcon fontSize="small" />
-            </IconButton>
+          {showNav && (
+            <Stack direction="row" alignItems="center" spacing={0.25}>
+              <IconButton size="small" onClick={onCalendarPrev} aria-label="上一期">
+                <ChevronLeftRoundedIcon fontSize="small" />
+              </IconButton>
+              <Typography sx={{ fontSize: 13, fontWeight: 600, color: DASHBOARD_THEME.textPrimary, minWidth: 88, textAlign: 'center' }}>
+                {periodLabel}
+              </Typography>
+              <IconButton size="small" onClick={onCalendarNext} aria-label="下一期">
+                <ChevronRightRoundedIcon fontSize="small" />
+              </IconButton>
+            </Stack>
+          )}
+          {!showNav && (
             <Typography sx={{ fontSize: 13, fontWeight: 600, color: DASHBOARD_THEME.textPrimary, minWidth: 88, textAlign: 'center' }}>
-              {calendarGranularity === 'year' ? `${calendarYear}年` : formatYearMonth(calendarYear, calendarMonth)}
+              {periodLabel}
             </Typography>
-            <IconButton size="small" onClick={onCalendarNext} aria-label="下一期">
-              <ChevronRightRoundedIcon fontSize="small" />
-            </IconButton>
-          </Stack>
+          )}
           <SegmentedControl
             value={calendarGranularity}
             options={[
+              { value: 'day', label: '日' },
               { value: 'month', label: '月' },
               { value: 'year', label: '年' },
             ]}

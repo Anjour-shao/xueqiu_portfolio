@@ -24,6 +24,7 @@ export function DataTable({
   rows,
   dense = false,
   compact = false,
+  minWidth,
   sort,
   onSort,
   getCellLink,
@@ -37,6 +38,7 @@ export function DataTable({
   rows: Array<Array<string | number | ReactNode>>;
   dense?: boolean;
   compact?: boolean;
+  minWidth?: number;
   sort?: TableSort | null;
   onSort?: (key: string) => void;
   getCellLink?: (rowIndex: number, columnKey: string) => string | null;
@@ -46,8 +48,8 @@ export function DataTable({
   stickyHeader?: boolean;
   showRowHoverActions?: boolean;
 }) {
-  const cellPy = dense ? 1 : 1.35;
-  const cellPx = compact ? 1 : dense ? 1.25 : 1.5;
+  const cellPy = compact && dense ? 0.75 : dense ? 1 : 1.35;
+  const cellPx = compact && dense ? 0.75 : compact ? 1 : dense ? 1.25 : 1.5;
   const fontSize = dense ? 12 : 13;
   const hasActions = Boolean(rowActions);
 
@@ -63,8 +65,8 @@ export function DataTable({
         sx={{
           width: '100%',
           borderCollapse: 'collapse',
-          minWidth: compact ? 280 : 640,
-          tableLayout: compact ? 'fixed' : 'auto',
+          minWidth: minWidth ?? (compact ? 280 : 640),
+          tableLayout: compact && !minWidth ? 'fixed' : compact ? 'auto' : 'auto',
         }}
       >
         <Box component="thead" sx={stickyHeader ? { position: 'sticky', top: 0, zIndex: 1 } : undefined}>
@@ -72,6 +74,8 @@ export function DataTable({
             {columns.map((col) => {
               const active = sort?.key === col.key;
               const canSort = col.sortable && onSort;
+              const headerClip = col.clip !== false;
+              const headerUppercase = /^[A-Za-z0-9\s%]+$/.test(col.label);
               return (
                 <Box
                   key={col.key}
@@ -79,11 +83,11 @@ export function DataTable({
                   onClick={() => handleHeaderClick(col)}
                   sx={{
                     textAlign: col.align ?? 'center',
-                    fontSize: 11,
+                    fontSize: dense ? 10 : 11,
                     fontWeight: 600,
                     color: active ? DASHBOARD_THEME.primary : DASHBOARD_THEME.textMuted,
-                    letterSpacing: '0.04em',
-                    textTransform: 'uppercase',
+                    letterSpacing: headerUppercase ? '0.04em' : undefined,
+                    textTransform: headerUppercase ? 'uppercase' : 'none',
                     py: cellPy,
                     px: cellPx,
                     bgcolor: DASHBOARD_THEME.surface,
@@ -91,9 +95,9 @@ export function DataTable({
                     cursor: canSort ? 'pointer' : 'default',
                     userSelect: 'none',
                     width: compact && col.width ? col.width : undefined,
-                    maxWidth: compact && col.width && col.clip !== false ? col.width : undefined,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
+                    maxWidth: compact && col.width && headerClip ? col.width : undefined,
+                    overflow: headerClip ? 'hidden' : 'visible',
+                    textOverflow: headerClip ? 'ellipsis' : 'clip',
                     '&:hover': canSort ? { color: DASHBOARD_THEME.primary } : undefined,
                   }}
                 >

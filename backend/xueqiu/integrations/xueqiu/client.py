@@ -91,6 +91,39 @@ class XueQiuApiClient:
         except ValueError as exc:
             raise XueQiuApiError(f"JSON 解析失败: {text[:200]}") from exc
 
+    def get_json_with_retry(
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+        *,
+        referer: str | None = None,
+        warm_symbol: str | None = None,
+        max_retries: int = 5,
+        delay: tuple[float, float] = (1.4, 2.6),
+    ) -> Any:
+        """雪球 400/429/502/503 时退避重试。"""
+        last: XueQiuApiError | None = None
+        for attempt in range(max_retries):
+            try:
+                return self.get_json(
+                    url,
+                    params=params,
+                    referer=referer,
+                    warm_symbol=warm_symbol,
+                )
+            except XueQiuApiError as exc:
+                last = exc
+                msg = str(exc)
+                if attempt < max_retries - 1 and any(
+                    token in msg for token in ("400", "429", "502", "503")
+                ):
+                    time.sleep(random.uniform(*delay) * (attempt + 1))
+                    continue
+                raise
+        if last is not None:
+            raise last
+        raise XueQiuApiError("雪球请求失败")
+
     def paginate(
         self,
         fetch_page,

@@ -99,6 +99,33 @@ export function summarizeYearMonths(points: EquityPoint[], year: number): { mont
   }));
 }
 
+export function summarizeYear(points: EquityPoint[], year: number): MonthSummary {
+  const inYear = points
+    .filter((p) => parseTradeDate(p.trade_date).getFullYear() === year)
+    .sort((a, b) => a.trade_date.localeCompare(b.trade_date));
+
+  if (!inYear.length) {
+    return { periodReturnPct: null, tradingDays: 0 };
+  }
+
+  const withNav = inYear.filter((p) => typeof p.nav === 'number' && p.nav > 0);
+  if (withNav.length >= 2) {
+    const first = withNav[0].nav!;
+    const last = withNav[withNav.length - 1].nav!;
+    const pct = first > 0 ? ((last / first - 1) * 100) : null;
+    return { periodReturnPct: pct != null ? Math.round(pct * 100) / 100 : null, tradingDays: inYear.length };
+  }
+
+  return { periodReturnPct: null, tradingDays: inYear.length };
+}
+
+export function summarizeYears(points: EquityPoint[]): { year: number; summary: MonthSummary }[] {
+  const years = new Set(points.map((p) => parseTradeDate(p.trade_date).getFullYear()));
+  return [...years]
+    .sort((a, b) => a - b)
+    .map((year) => ({ year, summary: summarizeYear(points, year) }));
+}
+
 export function formatYearMonth(year: number, month: number) {
   return `${year}年 ${month + 1}月`;
 }
@@ -140,4 +167,9 @@ export function summarizeBenchmarkPeriod(points: EquityPoint[], year: number, mo
   const end = inPeriod[inPeriod.length - 1].benchmark_return_pct!;
   const pct = (1 + end / 100) / (1 + start / 100) - 1;
   return Math.round(pct * 10000) / 100;
+}
+
+/** 全年上证区间收益 */
+export function summarizeBenchmarkYear(points: EquityPoint[], year: number): number | null {
+  return summarizeBenchmarkPeriod(points, year);
 }

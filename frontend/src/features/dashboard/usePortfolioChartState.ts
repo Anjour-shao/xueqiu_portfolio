@@ -6,12 +6,13 @@ import type { ChartViewMode } from './ChartViewToolbar';
 export function usePortfolioChartState() {
   const now = new Date();
   const [chartView, setChartView] = useState<ChartViewMode>('line');
-  const [calendarGranularity, setCalendarGranularity] = useState<CalendarGranularity>('month');
+  const [calendarGranularity, setCalendarGranularity] = useState<CalendarGranularity>('day');
   const [calendarYear, setCalendarYear] = useState(now.getFullYear());
   const [calendarMonth, setCalendarMonth] = useState(now.getMonth());
 
   const handleCalendarPrev = () => {
-    if (calendarGranularity === 'year') {
+    if (calendarGranularity === 'year') return;
+    if (calendarGranularity === 'month') {
       setCalendarYear((y) => y - 1);
     } else {
       const next = shiftMonth(calendarYear, calendarMonth, -1);
@@ -21,7 +22,8 @@ export function usePortfolioChartState() {
   };
 
   const handleCalendarNext = () => {
-    if (calendarGranularity === 'year') {
+    if (calendarGranularity === 'year') return;
+    if (calendarGranularity === 'month') {
       setCalendarYear((y) => y + 1);
     } else {
       const next = shiftMonth(calendarYear, calendarMonth, 1);

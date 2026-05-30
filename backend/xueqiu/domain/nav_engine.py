@@ -126,6 +126,48 @@ def load_latest_hfq_marks(ts_codes: set[str]) -> dict[str, tuple[str, float]]:
     return best
 
 
+def load_latest_adj_factors(ts_codes: set[str]) -> dict[str, tuple[str, float]]:
+    """读取各标的最新复权因子，用于后复权价换算为未复权价。"""
+    if not ts_codes:
+        return {}
+    normalized = {to_xueqiu_code(c) for c in ts_codes}
+    with get_conn() as conn:
+        rows = conn.execute(
+            select(
+                quote_points_table.c.ts_code,
+                quote_points_table.c.trade_date,
+                quote_points_table.c.adj_factor,
+            ).where(quote_points_table.c.ts_code.in_(sorted(normalized)))
+        ).fetchall()
+
+    best: dict[str, tuple[str, float]] = {}
+    for row in rows:
+        code = to_xueqiu_code(str(row.ts_code))
+        trade_date = str(row.trade_date)
+        adj = float(row.adj_factor)
+        if adj <= 0:
+            continue
+        if code not in best or trade_date > best[code][0]:
+            best[code] = (trade_date, adj)
+    return best
+
+
+def _raw_mark_from_hfq(
+    mark_hfq: float,
+    vwap_hfq: float,
+    raw_vwap: float | None,
+    adj_entry: tuple[str, float] | None = None,
+) -> float | None:
+    """后复权现价 → 未复权现价；优先用持仓成本比例，避免 adj_factor=1 时换算失效。"""
+    if mark_hfq <= 0:
+        return None
+    if raw_vwap and raw_vwap > 0 and vwap_hfq > 0:
+        return round(mark_hfq * raw_vwap / vwap_hfq, 4)
+    if adj_entry and adj_entry[1] > 1.0 + 1e-9:
+        return round(mark_hfq / adj_entry[1], 4)
+    return None
+
+
 def load_benchmark_closes(trade_dates: set[str]) -> dict[str, float]:
     if not trade_dates:
         return {}
@@ -158,6 +200,7 @@ ENGINE_VERSION = "virtual_fund_v3"
 class Holding:
     qty: float = 0.0
     vwap: float = 0.0
+    raw_vwap: float = 0.0
 
 
 @dataclass
@@ -242,6 +285,7 @@ class VirtualFund:
         from_weight: float,
         price: float,
         nav_pre: float,
+        raw_price: float | None = None,
     ) -> None:
         """日志首笔即有仓位时，按 from_weight 与当日 NAV 补建底仓。"""
         holding = self._holding(code)
@@ -251,6 +295,7 @@ class VirtualFund:
         if qty <= 1e-12:
             return
         holding.vwap = price
+        holding.raw_vwap = raw_price if raw_price and raw_price > 0 else 0.0
         holding.qty = qty
         self.cash -= qty * price
 
@@ -261,6 +306,7 @@ class VirtualFund:
         price: float,
         nav_pre: float,
         weight_sold_pct: float = 0.0,
+        raw_price: float | None = None,
     ) -> tuple[float | None, float | None, float]:
         """调整至目标股数；卖出时记录 leg 与卖出权重。"""
         holding = self._holding(code)
@@ -276,8 +322,15 @@ class VirtualFund:
             buy_qty = delta
             if holding.qty <= 1e-12:
                 holding.vwap = price
+                holding.raw_vwap = raw_price if raw_price and raw_price > 0 else 0.0
             else:
                 holding.vwap = (holding.qty * holding.vwap + buy_qty * price) / (holding.qty + buy_qty)
+                if raw_price and raw_price > 0 and holding.raw_vwap > 0:
+                    holding.raw_vwap = (
+                        holding.qty * holding.raw_vwap + buy_qty * raw_price
+                    ) / (holding.qty + buy_qty)
+                elif raw_price and raw_price > 0:
+                    holding.raw_vwap = raw_price
             holding.qty += buy_qty
             self.cash -= buy_qty * price
             return None, None, 0.0
@@ -303,6 +356,7 @@ class VirtualFund:
         if holding.qty <= 1e-12:
             holding.qty = 0.0
             holding.vwap = 0.0
+            holding.raw_vwap = 0.0
 
         contrib_pct = round(realized / nav_pre * 100, 4) if nav_pre > 0 else None
         return leg_return_pct, contrib_pct, realized
@@ -315,13 +369,14 @@ class VirtualFund:
         to_weight: float,
         price: float,
         nav_pre: float,
+        raw_price: float | None = None,
     ) -> tuple[float | None, float | None, float | None]:
         self.stock_names[code] = stock_name
-        self._bootstrap_if_needed(code, from_weight, price, nav_pre)
+        self._bootstrap_if_needed(code, from_weight, price, nav_pre, raw_price=raw_price)
         weight_sold = max(from_weight - to_weight, 0.0)
         target_qty = (to_weight / 100.0) * nav_pre / price if to_weight > 0 else 0.0
         leg, contrib, _ = self.rebalance_to_qty(
-            code, target_qty, price, nav_pre, weight_sold_pct=weight_sold
+            code, target_qty, price, nav_pre, weight_sold_pct=weight_sold, raw_price=raw_price
         )
         return leg, contrib, leg
 
@@ -330,6 +385,12 @@ class VirtualFund:
         if not h or h.qty <= 1e-12:
             return 0.0, 0.0
         return h.qty, h.vwap
+
+    def raw_cost(self, code: str) -> float | None:
+        h = self.holdings.get(code)
+        if not h or h.qty <= 1e-12 or h.raw_vwap <= 0:
+            return None
+        return h.raw_vwap
 
     def unrealized(self, code: str, mark: float) -> float:
         qty, vwap = self.position_snapshot(code)
@@ -503,6 +564,7 @@ def compute_pseudo_nav(trades: list[TradeInput]) -> dict[str, Any]:
                 continue
 
             nav_at_trade = fund.nav(event_prices)
+            raw_price = float(trade.price) if trade.price and trade.price > 0 else None
             leg_return_pct, account_contrib_pct, _ = fund.apply_trade(
                 code=code,
                 stock_name=trade.stock_name,
@@ -510,6 +572,7 @@ def compute_pseudo_nav(trades: list[TradeInput]) -> dict[str, Any]:
                 to_weight=float(trade.to_weight),
                 price=hfq,
                 nav_pre=nav_at_trade,
+                raw_price=raw_price,
             )
             fund.record_holding_lifecycle(
                 code,
@@ -559,6 +622,7 @@ def compute_pseudo_nav(trades: list[TradeInput]) -> dict[str, Any]:
     last_trade_date = fmt_trade_date(trades[-1].trade_time)
     holding_codes = {code for code, weight in fund.last_weights.items() if weight > 0}
     latest_quotes = load_latest_hfq_marks(holding_codes)
+    latest_adj = load_latest_adj_factors(holding_codes)
 
     latest_mark_prices: dict[str, float] = {}
     latest_quote_dates: dict[str, str] = {}
@@ -608,9 +672,14 @@ def compute_pseudo_nav(trades: list[TradeInput]) -> dict[str, Any]:
         mark = latest_mark_prices.get(code) or fund.last_marks.get(code)
         quote_date = latest_quote_dates.get(code, last_trade_date)
         _, vwap = fund.position_snapshot(code)
+        raw_vwap = fund.raw_cost(code)
         return_pct = None
         if mark and vwap > 0:
             return_pct = round((mark / vwap - 1.0) * 100, 2)
+
+        mark_raw: float | None = None
+        if mark and mark > 0:
+            mark_raw = _raw_mark_from_hfq(mark, vwap, raw_vwap, latest_adj.get(code))
 
         as_of = _as_of_time(quote_date, trades[-1].trade_time)
         duration = fund.holding_duration_fields(code, as_of)
@@ -620,6 +689,8 @@ def compute_pseudo_nav(trades: list[TradeInput]) -> dict[str, Any]:
                 "stock_name": fund.stock_names.get(code, code),
                 "last_action": fund.last_actions.get(code, ""),
                 "current_weight": round(weight, 2),
+                "avg_cost": round(raw_vwap, 4) if raw_vwap else None,
+                "mark_price": mark_raw,
                 "avg_cost_hfq": round(vwap, 4) if vwap > 0 else None,
                 "mark_price_hfq": round(mark, 4) if mark else None,
                 "return_pct": return_pct,

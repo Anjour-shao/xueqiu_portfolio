@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -145,89 +147,6 @@ class PortfoliosOverviewStatsResponse(BaseModel):
     items: list[PortfolioOverviewItem]
 
 
-class DiscoverPortfoliosRequest(BaseModel):
-    """catalog：从 cube_catalog 抽样（默认）；random/sequential 为旧模式。"""
-
-    scan_mode: str = Field("catalog", description="catalog | random | sequential")
-    batch_size: int = Field(30, ge=1, le=500, description="本批抽样数量")
-    profiles: list[str] = Field(
-        default_factory=lambda: ["mature_scaled", "young_high_return"],
-        description="启用的画像：mature_scaled | young_high_return",
-    )
-    max_rebalance_per_month: int = Field(4, ge=1, le=30, description="近 3 个月每月调仓事件上限")
-    nav_threshold_5y: float = Field(6.0, description="成立满 5 年时的净值门槛")
-    nav_threshold_10y: float = Field(40.0, description="成立满 10 年时的净值门槛")
-    young_min_cum_pct: float = Field(300.0, description="成立不足 5 年累计收益 % 下限")
-    max_inactive_days: int | None = Field(90, description="最近 N 天无成功调仓则排除")
-    exclude_followed: bool = Field(True, description="跳过已在库中的组合")
-    zh_num_lo: int = Field(1_000_000, ge=1, description="[random] ZH 数字下限")
-    zh_num_hi: int = Field(3_565_914, ge=1, description="[random] ZH 数字上限")
-    zh_num_start: int | None = Field(None, ge=1, description="[sequential] 下一批起始数字")
-    zh_num_end_goal: int | None = Field(None, ge=1, description="[sequential] 爬取目标上限")
-    zh_num_min: int | None = Field(None, ge=1, description="[sequential] 区间下限")
-    zh_num_max: int | None = Field(None, ge=1, description="[sequential] 区间上限")
-    step: int = Field(1, ge=1, le=1000)
-    max_scan: int = Field(80, ge=1, le=500)
-    min_nav: float | None = Field(None, description="已废弃，保留兼容")
-    min_cum_return_pct: float | None = Field(None)
-    max_cum_return_pct: float | None = Field(None)
-
-    @model_validator(mode="after")
-    def _check_scan_mode(self) -> DiscoverPortfoliosRequest:
-        if self.scan_mode == "sequential":
-            if self.zh_num_start is not None:
-                return self
-            if self.zh_num_min is not None and self.zh_num_max is not None:
-                return self
-            raise ValueError("sequential 模式需提供 zh_num_start 或 zh_num_min + zh_num_max")
-        if self.scan_mode == "random" and self.zh_num_lo > self.zh_num_hi:
-            raise ValueError("zh_num_lo 不能大于 zh_num_hi")
-        return self
-
-
-class DiscoveredPortfolioItem(BaseModel):
-    account_code: str
-    account_name: str
-    latest_nav: float
-    cum_return_pct: float
-    latest_nav_date: str | None = None
-    latest_trade_time: str | None = None
-    already_followed: bool = False
-    matched_profiles: list[str] = Field(default_factory=list)
-    required_nav_threshold: float | None = None
-    inception_days: int | None = None
-    inception_years: float | None = None
-
-
-class DiscoverPortfoliosResponse(BaseModel):
-    scanned: int
-    matched_count: int
-    not_found: int
-    filtered_out: int
-    items: list[DiscoveredPortfolioItem]
-    scan_mode: str | None = None
-    catalog_pool_size: int | None = None
-    catalog_discovered_count: int | None = None
-    catalog_remaining_count: int | None = None
-    batch_start: int | None = None
-    batch_end: int | None = None
-    last_scanned_num: int | None = None
-    next_checkpoint: int | None = None
-
-
-class FollowPortfoliosRequest(BaseModel):
-    account_codes: list[str] = Field(..., min_length=1)
-    sync_after_follow: bool = Field(True, description="保留字段；服务端关注后始终全量同步")
-
-
-class FollowPortfoliosResponse(BaseModel):
-    ok: bool
-    followed_count: int
-    message: str
-    account_codes: list[str]
-    errors: list[str] = Field(default_factory=list)
-
-
 class DeleteAccountResponse(BaseModel):
     ok: bool
     account_code: str
@@ -241,6 +160,8 @@ class PositionItem(BaseModel):
     stock_name: str
     last_action: str
     current_weight: float
+    avg_cost: float | None = None
+    mark_price: float | None = None
     avg_cost_hfq: float | None
     mark_price_hfq: float | None
     return_pct: float | None
@@ -421,8 +342,10 @@ class CopyBacktestPosition(BaseModel):
     ts_code: str
     stock_name: str
     qty: float
+    avg_cost: float | None = None
     mark_price: float
     mark_price_hfq: float | None = None
+    return_pct: float | None = None
     value: float
     weight_pct: float
 
@@ -442,15 +365,77 @@ class CopyBacktestTradeLog(BaseModel):
     our_weight_pct: float
     nav_after: float
     note: str = ""
+    trigger: str | None = None
+    leg_return_pct: float | None = None
+    slice_qty_before: float | None = None
+    slice_qty_after: float | None = None
+    physical_qty: float | None = None
 
 
 class CopyBacktestRequest(BaseModel):
-    initial_capital: float = 100_000.0
+    initial_capital: float = 1_000_000.0
     max_stock_pct: float = 20.0
-    star_unlock_profit: float = 500_000.0
-    lot_size: int = 100
     min_new_position_pct: float = 1.0
-    allow_star_market: bool = False
+    max_positions: int = 5
+    strategy_id: str = "route_f_partition_mimic"
+    start_date: str | None = None
+    end_date: str | None = None
+
+
+class StrategyCatalogItem(BaseModel):
+    id: str
+    label: str
+    description: str
+    style: str
+
+
+class StrategyCompareSummary(BaseModel):
+    strategy_id: str | None = None
+    label: str | None = None
+    description: str | None = None
+    style: str | None = None
+    return_pct: float | None = None
+    return_since_entry: float | None = None
+    entry_date: str | None = None
+    return_since_2020: float | None = None
+    return_since_2023: float | None = None
+    max_drawdown_pct: float | None = None
+    sharpe_proxy: float | None = None
+    cash_pct: float | None = None
+    position_count: int | None = None
+    orphan_sell_count: int | None = None
+    rotate_count: int | None = None
+    rebalance_count: int | None = None
+    final_nav_hfq: float | None = None
+    current_leader: str | None = None
+    leader_switches: int | None = None
+
+
+class EntrySweepItem(BaseModel):
+    date: str
+    strategy_id: str
+    label: str | None = None
+    return_pct: float | None = None
+    max_drawdown_pct: float | None = None
+    cash_pct: float | None = None
+    position_count: int | None = None
+
+
+class StrategyCompareRequest(BaseModel):
+    initial_capital: float = 1_000_000.0
+    strategy_ids: list[str]
+    start_date: str | None = None
+    end_date: str | None = None
+    entry_sweep_dates: list[str] | None = None
+
+
+class StrategyCompareResponse(BaseModel):
+    initial_capital: float
+    start_date: str | None = None
+    end_date: str | None = None
+    results: list[StrategyCompareSummary]
+    consensus_stats: dict[str, Any] = {}
+    entry_sweep: list[EntrySweepItem] = []
 
 
 class CopyBacktestResponse(BaseModel):
@@ -468,41 +453,73 @@ class CopyBacktestResponse(BaseModel):
     end_time: str
     blocked_688: int
     cap_triggers: int
+    rotate_triggers: int = 0
+    rebalance_triggers: int = 0
     skipped_lot: int
     skipped_small: int
     trade_log_count: int
     star_unlocked: bool
-    star_unlock_profit: float
     max_stock_pct: float
-    lot_size: int
     min_new_position_pct: float
-    allow_star_market: bool = False
+    max_positions: int
+    overview_win_rate: float = 0.0
     source_stats: dict[str, int]
     positions: list[CopyBacktestPosition]
     equity_curve: list[CopyBacktestEquityPoint]
     trade_logs: list[CopyBacktestTradeLog]
+    grouped_stats: list[GroupedStatItem] = []
 
 
-class CubeCatalogStatsResponse(BaseModel):
+class DiscoveryStatsResponse(BaseModel):
     total_count: int
-    discovered_count: int = 0
-    remaining_count: int = 0
-    last_updated_at: str | None = None
+    auto_pass_count: int = 0
+    pending_count: int = 0
+    selected_count: int = 0
+    rejected_count: int = 0
+    imported_count: int = 0
 
 
-class ResetCubeCatalogDiscoverResponse(BaseModel):
+class MinedCubeItem(BaseModel):
+    account_code: str
+    account_name: str
+    owner_uid: int | None = None
+    owner_name: str | None = None
+    source_user_uid: int | None = None
+    source_account_code: str | None = None
+    depth: int = 1
+    cum_return_pct: float | None = None
+    nav_latest_date: str | None = None
+    has_non_a_share: bool = False
+    auto_pass: bool = False
+    reject_reasons: list[str] = Field(default_factory=list)
+    selected: int | None = None
+    note: str | None = None
+    imported_at: str | None = None
+    first_seen_at: str | None = None
+    updated_at: str | None = None
+
+
+class MinedCubeListResponse(BaseModel):
+    items: list[MinedCubeItem]
+
+
+class DiscoveryMineRequest(BaseModel):
+    max_depth: int = 1
+
+
+class DiscoveryMineResponse(BaseModel):
     ok: bool
     message: str
-    reset_count: int = 0
+    stats: dict[str, int] = Field(default_factory=dict)
 
 
-class SyncCubeCatalogResponse(BaseModel):
+class UpdateMinedCubeRequest(BaseModel):
+    selected: int | None = None
+    note: str | None = None
+
+
+class ImportMinedCubeResponse(BaseModel):
     ok: bool
     message: str
-    fetched_count: int = 0
-    new_count: int = 0
-    updated_count: int = 0
-    total_count: int = 0
-    sources_ok: list[str] = Field(default_factory=list)
-    sources_skipped: list[str] = Field(default_factory=list)
-    logs: list[dict[str, str]] = Field(default_factory=list)
+    account_code: str
+    sync: dict[str, Any] = Field(default_factory=dict)

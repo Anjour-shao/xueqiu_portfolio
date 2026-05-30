@@ -4,17 +4,22 @@ import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import TrendingUpRoundedIcon from '@mui/icons-material/TrendingUpRounded';
 import { Box, Button, CircularProgress, Typography } from '@mui/material';
 import axios from 'axios';
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { deleteAccount, fetchAccounts, fetchDashboard, syncLatestHfq } from '../api/dashboard';
+import { deleteAccount, fetchAccounts, fetchDashboard, runCopyBacktest, syncLatestHfq } from '../api/dashboard';
 import { ImportLogsDialog } from '../components/ImportLogsDialog';
 import { LoadingView } from '../components/LoadingView';
 import {
   BACKTEST_ACCOUNT_ID,
   getBacktestDashboard,
+  getBacktestMeta,
   isBacktestAccount,
+  setBacktestDashboard,
+  type BacktestSessionMeta,
 } from '../features/backtest/backtestSession';
+import { copyBacktestToDashboard } from '../features/backtest/backtestAdapter';
+import type { EntryPickConfig } from '../features/dashboard/EquityChart';
 import { PortfolioDetailView } from '../features/dashboard/PortfolioDetailView';
 import { PortfolioPageHeader } from '../components/PageHeader';
 import { useToast } from '../features/notify/ToastProvider';
@@ -28,6 +33,11 @@ export function HoldingsPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [refreshingQuotes, setRefreshingQuotes] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [backtestRevision, setBacktestRevision] = useState(0);
+  const [backtestMeta, setBacktestMeta] = useState<BacktestSessionMeta | null>(() => getBacktestMeta());
+  const [entryPickMode, setEntryPickMode] = useState(false);
+  const [pendingEntryDate, setPendingEntryDate] = useState<string | null>(null);
+  const [rerunningBacktest, setRerunningBacktest] = useState(false);
 
   const activeAccount = accountCode?.trim() ?? '';
   const isBacktest = isBacktestAccount(activeAccount);
@@ -46,11 +56,101 @@ export function HoldingsPage() {
 
   const backtestDashboard = useMemo(
     () => (isBacktest ? getBacktestDashboard() : null),
-    [isBacktest, activeAccount],
+    [isBacktest, activeAccount, backtestRevision],
   );
 
   const dashboard = isBacktest ? backtestDashboard : dashboardQuery.data;
 
+  const handleRerunFromEntry = useCallback(async () => {
+    if (!backtestMeta || !pendingEntryDate) return;
+    setRerunningBacktest(true);
+    try {
+      const data = await runCopyBacktest({
+        strategy_id: backtestMeta.strategy_id,
+        initial_capital: backtestMeta.initial_capital,
+        max_stock_pct: 20,
+        min_new_position_pct: 1,
+        max_positions: 10,
+        start_date: pendingEntryDate,
+      });
+      const meta: BacktestSessionMeta = {
+        ...backtestMeta,
+        entry_date: pendingEntryDate,
+      };
+      setBacktestDashboard(copyBacktestToDashboard(data, meta), meta);
+      setBacktestMeta(meta);
+      setBacktestRevision((v) => v + 1);
+      setPendingEntryDate(null);
+      setEntryPickMode(false);
+      showToast(`已从 ${pendingEntryDate} 重新回测`, 'success');
+    } catch (err) {
+      let text = '重新回测失败';
+      if (axios.isAxiosError(err)) {
+        const detail = err.response?.data?.detail;
+        text = typeof detail === 'string' ? detail : err.message;
+      }
+      showToast(text, 'error');
+    } finally {
+      setRerunningBacktest(false);
+    }
+  }, [backtestMeta, pendingEntryDate, showToast]);
+
+  const handleResetFullBacktest = useCallback(async () => {
+    if (!backtestMeta) return;
+    setRerunningBacktest(true);
+    try {
+      const data = await runCopyBacktest({
+        strategy_id: backtestMeta.strategy_id,
+        initial_capital: backtestMeta.initial_capital,
+        max_stock_pct: 20,
+        min_new_position_pct: 1,
+        max_positions: 10,
+        start_date: null,
+      });
+      const meta: BacktestSessionMeta = {
+        ...backtestMeta,
+        entry_date: null,
+      };
+      setBacktestDashboard(copyBacktestToDashboard(data, meta), meta);
+      setBacktestMeta(meta);
+      setBacktestRevision((v) => v + 1);
+      setPendingEntryDate(null);
+      setEntryPickMode(false);
+      showToast('已恢复全历史回测', 'success');
+    } catch (err) {
+      let text = '恢复全历史失败';
+      if (axios.isAxiosError(err)) {
+        const detail = err.response?.data?.detail;
+        text = typeof detail === 'string' ? detail : err.message;
+      }
+      showToast(text, 'error');
+    } finally {
+      setRerunningBacktest(false);
+    }
+  }, [backtestMeta, showToast]);
+
+  const entryPick: EntryPickConfig | undefined = useMemo(() => {
+    if (!isBacktest || !backtestMeta) return undefined;
+    return {
+      activeDate: backtestMeta.entry_date ?? null,
+      pendingDate: pendingEntryDate,
+      pickMode: entryPickMode,
+      rerunning: rerunningBacktest,
+      onTogglePickMode: () => setEntryPickMode((v) => !v),
+      onPickDate: (date) => setPendingEntryDate(date),
+      onRerun: () => void handleRerunFromEntry(),
+      onResetFull: () => void handleResetFullBacktest(),
+      onClearPending: () => setPendingEntryDate(null),
+    };
+  }, [
+    isBacktest,
+    backtestMeta,
+    pendingEntryDate,
+    entryPickMode,
+    rerunningBacktest,
+    handleRerunFromEntry,
+    handleResetFullBacktest,
+  ]);
   const livePositions = useMemo(
     () => (dashboard?.positions ?? []).filter((item) => item.current_weight > 0),
     [dashboard?.positions],
@@ -204,7 +304,7 @@ export function HoldingsPage() {
 
           {dashboard && (
             <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-              <PortfolioDetailView dashboard={dashboard} showBrushControls={isBacktest} />
+              <PortfolioDetailView dashboard={dashboard} showBrushControls entryPick={entryPick} />
             </Box>
           )}
         </Box>

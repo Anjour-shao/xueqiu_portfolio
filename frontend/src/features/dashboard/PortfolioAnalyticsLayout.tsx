@@ -1,7 +1,8 @@
 import { Box, Stack } from '@mui/material';
 import { ReactNode } from 'react';
 import { OverviewMetrics } from '../../types';
-import { CalendarGranularity, ChartViewToolbar, ChartViewMode } from './ChartViewToolbar';
+import { CalendarGranularity } from './PnlCalendarView';
+import { ChartViewToolbar, ChartViewMode } from './ChartViewToolbar';
 import { StatsBar } from './StatsBar';
 import { surfaceCardSx } from './utils';
 

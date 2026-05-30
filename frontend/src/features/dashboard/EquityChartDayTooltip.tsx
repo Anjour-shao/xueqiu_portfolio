@@ -10,11 +10,11 @@ import {
   pctColor,
 } from './utils';
 
-export const EQUITY_DAY_TOOLTIP_WIDTH = 272;
-export const EQUITY_DAY_TOOLTIP_MAX_HEIGHT = 480;
+export const EQUITY_DAY_TOOLTIP_WIDTH = 200;
+export const EQUITY_DAY_TOOLTIP_MAX_HEIGHT = 420;
 
-const TRADE_GRID = 'minmax(0, 1fr) 40px 72px';
-const HOLDING_GRID = 'minmax(0, 1fr) 56px';
+const TRADE_GRID = 'minmax(0, 1fr) 32px 52px';
+const HOLDING_GRID = 'minmax(0, 1fr) 40px';
 
 type Props = {
   date: string;
@@ -27,8 +27,6 @@ type Props = {
   holdings: EquityHoldingItem[];
   left: number;
   top: number;
-  onPointerEnter: () => void;
-  onPointerLeave: () => void;
 };
 
 function actionPillSx(action: string) {
@@ -159,23 +157,21 @@ export function EquityChartDayTooltip({
   holdings,
   left,
   top,
-  onPointerEnter,
-  onPointerLeave,
 }: Props) {
   return (
     <Box
-      onPointerEnter={onPointerEnter}
-      onPointerLeave={onPointerLeave}
       sx={{
         position: 'absolute',
         left,
         top,
-        width: EQUITY_DAY_TOOLTIP_WIDTH,
+        width: 'max-content',
+        minWidth: 148,
+        maxWidth: EQUITY_DAY_TOOLTIP_WIDTH,
         maxHeight: `min(72vh, ${EQUITY_DAY_TOOLTIP_MAX_HEIGHT}px)`,
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        pointerEvents: 'auto',
+        pointerEvents: 'none',
         zIndex: 10,
         bgcolor: 'rgba(255, 255, 255, 0.98)',
         border: DASHBOARD_THEME.cardBorder,
@@ -186,9 +182,9 @@ export function EquityChartDayTooltip({
       <Box
         sx={{
           flexShrink: 0,
-          px: 1.25,
-          pt: 0.75,
-          pb: 0.5,
+          px: 1,
+          pt: 0.625,
+          pb: 0.375,
           borderBottom: `1px solid ${DASHBOARD_THEME.borderSubtle}`,
         }}
       >
@@ -237,9 +233,8 @@ export function EquityChartDayTooltip({
           maxHeight: 'min(48vh, 320px)',
           overflowY: 'auto',
           overflowX: 'hidden',
-          px: 1.25,
-          pb: 1,
-          WebkitOverflowScrolling: 'touch',
+          px: 1,
+          pb: 0.75,
         }}
       >
         <SectionLabel first>调仓 {trades.length}</SectionLabel>

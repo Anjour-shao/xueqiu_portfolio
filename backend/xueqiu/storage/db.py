@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterator
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, MetaData, PrimaryKeyConstraint, String, Table, Text, UniqueConstraint, create_engine, inspect, text
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, Float, ForeignKey, Integer, MetaData, PrimaryKeyConstraint, SmallInteger, String, Table, Text, UniqueConstraint, create_engine, inspect, text
 from sqlalchemy.engine import Connection, Engine
 
 from xueqiu.config import DATABASE_URL
@@ -76,16 +76,30 @@ cube_nav_points_table = Table(
     PrimaryKeyConstraint("account_id", "trade_date", name="pk_cube_nav_points"),
 )
 
-# 雪球发现页/榜单 API 拉取的组合目录（代码 + 名称，与 accounts 关注列表独立）
-cube_catalog_table = Table(
-    "cube_catalog",
+# 社交挖组合：已爬到的候选 ZH（有行即已爬过；selected 为人工选中态）
+mined_cubes_table = Table(
+    "mined_cubes",
     metadata,
     Column("account_code", String(64), primary_key=True),
     Column("account_name", String(255), nullable=False),
+    Column("owner_uid", BigInteger, nullable=True, index=True),
+    Column("owner_name", String(255), nullable=True),
+    Column("source_user_uid", BigInteger, nullable=True, index=True),
+    Column("source_account_code", String(64), nullable=True),
+    Column("depth", Integer, nullable=False, server_default=text("1")),
+    Column("cum_return_pct", Float, nullable=True),
+    Column("nav_latest_date", String(8), nullable=True),
+    Column("latest_rebalance_time", String(32), nullable=True),
+    Column("rebalance_count_6m", Integer, nullable=True),
+    Column("cube_market", String(16), nullable=True),
+    Column("has_non_a_share", Boolean, nullable=False, server_default=text("0")),
+    Column("auto_pass", Boolean, nullable=False, server_default=text("0")),
+    Column("reject_reasons", Text, nullable=True),
+    Column("selected", SmallInteger, nullable=True),
+    Column("note", Text, nullable=True),
+    Column("imported_at", DateTime, nullable=True),
     Column("first_seen_at", DateTime, nullable=False),
     Column("updated_at", DateTime, nullable=False),
-    Column("discovered", Boolean, nullable=False, server_default=text("0")),
-    Column("discovered_at", DateTime, nullable=True),
 )
 
 engine: Engine = create_engine(DATABASE_URL, future=True)
@@ -169,16 +183,38 @@ def _ensure_cube_nav_schema(conn: Connection) -> None:
         conn.execute(text("CREATE INDEX idx_cube_nav_account_date ON cube_nav_points(account_id, trade_date)"))
 
 
-def _ensure_cube_catalog_schema(conn: Connection) -> None:
+def _ensure_mined_cubes_schema(conn: Connection) -> None:
     inspector = inspect(conn)
-    if "cube_catalog" not in inspector.get_table_names():
-        cube_catalog_table.create(conn)
+    if "mined_cubes" not in inspector.get_table_names():
+        mined_cubes_table.create(conn)
         return
-    columns = {col["name"] for col in inspector.get_columns("cube_catalog")}
-    if "discovered" not in columns:
-        conn.execute(text("ALTER TABLE cube_catalog ADD COLUMN discovered TINYINT(1) NOT NULL DEFAULT 0"))
-    if "discovered_at" not in columns:
-        conn.execute(text("ALTER TABLE cube_catalog ADD COLUMN discovered_at DATETIME NULL"))
+    columns = {col["name"]: col for col in inspector.get_columns("mined_cubes")}
+    for uid_col in ("owner_uid", "source_user_uid"):
+        if uid_col not in columns:
+            continue
+        col_type = str(columns[uid_col].get("type", "")).upper()
+        if "BIGINT" not in col_type:
+            conn.execute(
+                text(f"ALTER TABLE mined_cubes MODIFY COLUMN {uid_col} BIGINT NULL")
+            )
+    indexes = {idx["name"] for idx in inspector.get_indexes("mined_cubes")}
+    if "idx_mined_cubes_source_uid" not in indexes:
+        conn.execute(text("CREATE INDEX idx_mined_cubes_source_uid ON mined_cubes(source_user_uid)"))
+    if "idx_mined_cubes_owner_uid" not in indexes:
+        conn.execute(text("CREATE INDEX idx_mined_cubes_owner_uid ON mined_cubes(owner_uid)"))
+    columns = {col["name"] for col in inspector.get_columns("mined_cubes")}
+    if "latest_rebalance_time" not in columns:
+        conn.execute(text("ALTER TABLE mined_cubes ADD COLUMN latest_rebalance_time VARCHAR(32) NULL"))
+    if "cube_market" not in columns:
+        conn.execute(text("ALTER TABLE mined_cubes ADD COLUMN cube_market VARCHAR(16) NULL"))
+    if "rebalance_count_6m" not in columns:
+        conn.execute(text("ALTER TABLE mined_cubes ADD COLUMN rebalance_count_6m INT NULL"))
+
+
+def _drop_legacy_cube_catalog(conn: Connection) -> None:
+    inspector = inspect(conn)
+    if "cube_catalog" in inspector.get_table_names():
+        conn.execute(text("DROP TABLE cube_catalog"))
 
 
 def init_db() -> None:
@@ -190,7 +226,8 @@ def init_db() -> None:
         _ensure_quote_points_schema(conn)
         _ensure_benchmark_schema(conn)
         _ensure_cube_nav_schema(conn)
-        _ensure_cube_catalog_schema(conn)
+        _drop_legacy_cube_catalog(conn)
+        _ensure_mined_cubes_schema(conn)
 
 
 @contextmanager

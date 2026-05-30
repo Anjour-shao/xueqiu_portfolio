@@ -5,17 +5,19 @@ import {
   buildMonthGrid,
   formatYearMonth,
   hasCalendarSeries,
-  parseTradeDate,
   summarizeBenchmarkPeriod,
+  summarizeBenchmarkYear,
   summarizeMonth,
+  summarizeYear,
   summarizeYearMonths,
+  summarizeYears,
   weekdayLabels,
 } from './calendarUtils';
 import { DASHBOARD_THEME, fmtPct, monoSx, pctColor } from './utils';
 
 const INDEX_NAME = '上证指数';
 
-export type CalendarGranularity = 'month' | 'year';
+export type CalendarGranularity = 'day' | 'month' | 'year';
 
 type Props = {
   points: EquityPoint[];
@@ -43,27 +45,17 @@ export function PnlCalendarView({ points, granularity, year, month, onYearMonthC
   const canShowCalendar = useMemo(() => hasCalendarSeries(points), [points]);
   const monthCells = useMemo(() => buildMonthGrid(year, month, points), [year, month, points]);
   const monthSummary = useMemo(() => summarizeMonth(points, year, month), [points, year, month]);
-  const yearSummary = useMemo(() => {
-    const inYear = points.filter((p) => parseTradeDate(p.trade_date).getFullYear() === year);
-    if (!inYear.length) return { periodReturnPct: null, tradingDays: 0 };
-    const sorted = [...inYear].sort((a, b) => a.trade_date.localeCompare(b.trade_date));
-    const withNav = sorted.filter((p) => typeof p.nav === 'number' && p.nav > 0);
-    if (withNav.length >= 2) {
-      const first = withNav[0].nav!;
-      const last = withNav[withNav.length - 1].nav!;
-      const pct = first > 0 ? Math.round(((last / first - 1) * 100) * 100) / 100 : null;
-      return { periodReturnPct: pct, tradingDays: inYear.length };
-    }
-    return { periodReturnPct: null, tradingDays: inYear.length };
-  }, [points, year]);
+  const yearSummary = useMemo(() => summarizeYear(points, year), [points, year]);
   const yearMonths = useMemo(() => summarizeYearMonths(points, year), [points, year]);
+  const allYears = useMemo(() => summarizeYears(points), [points]);
 
-  const benchPeriodPct = useMemo(
-    () => summarizeBenchmarkPeriod(points, year, granularity === 'month' ? month : undefined),
-    [points, year, month, granularity],
-  );
+  const benchPeriodPct = useMemo(() => {
+    if (granularity === 'day') return summarizeBenchmarkPeriod(points, year, month);
+    if (granularity === 'month') return summarizeBenchmarkYear(points, year);
+    return null;
+  }, [points, year, month, granularity]);
 
-  const periodSummary = granularity === 'year' ? yearSummary : monthSummary;
+  const periodSummary = granularity === 'day' ? monthSummary : granularity === 'month' ? yearSummary : null;
 
   if (!canShowCalendar) {
     return (
@@ -87,7 +79,7 @@ export function PnlCalendarView({ points, granularity, year, month, onYearMonthC
         overflow: 'hidden',
       }}
     >
-      {granularity === 'month' ? (
+      {granularity === 'day' ? (
         <>
           <Box
             sx={{
@@ -149,7 +141,7 @@ export function PnlCalendarView({ points, granularity, year, month, onYearMonthC
             })}
           </Box>
         </>
-      ) : (
+      ) : granularity === 'month' ? (
         <Box
           sx={{
             flex: '0 1 auto',
@@ -169,12 +161,12 @@ export function PnlCalendarView({ points, granularity, year, month, onYearMonthC
                 role="button"
                 tabIndex={0}
                 onClick={() => {
-                  onGranularityChange('month');
+                  onGranularityChange('day');
                   onYearMonthChange(year, m);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    onGranularityChange('month');
+                    onGranularityChange('day');
                     onYearMonthChange(year, m);
                   }
                 }}
@@ -202,6 +194,61 @@ export function PnlCalendarView({ points, granularity, year, month, onYearMonthC
             );
           })}
         </Box>
+      ) : (
+        <Box
+          sx={{
+            flex: '0 1 auto',
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))',
+            gap: 1,
+            alignContent: 'start',
+            overflowY: 'auto',
+            maxHeight: 'calc(100% - 56px)',
+          }}
+        >
+          {allYears.map(({ year: y, summary }) => {
+            const pct = summary.periodReturnPct;
+            const bg = pct == null ? 'transparent' : pct > 0 ? DASHBOARD_THEME.upTint : pct < 0 ? DASHBOARD_THEME.downTint : 'rgba(148,163,184,0.06)';
+            return (
+              <Box
+                key={y}
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  onGranularityChange('month');
+                  onYearMonthChange(y, 0);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    onGranularityChange('month');
+                    onYearMonthChange(y, 0);
+                  }
+                }}
+                sx={{
+                  borderRadius: 1.5,
+                  bgcolor: bg,
+                  border: DASHBOARD_THEME.cardBorder,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  minHeight: 72,
+                  cursor: 'pointer',
+                  transition: 'transform 0.12s',
+                  '&:hover': { transform: 'scale(1.02)', boxShadow: DASHBOARD_THEME.cardShadow },
+                }}
+              >
+                <Typography sx={{ fontSize: 12, color: DASHBOARD_THEME.textSecondary, mb: 0.5 }}>{y}年</Typography>
+                <Typography sx={{ fontSize: 15, fontWeight: 700, color: pctColor(pct ?? 0), ...monoSx }}>
+                  {pct != null ? fmtPct(pct) : '—'}
+                </Typography>
+                <Typography sx={{ fontSize: 10, color: DASHBOARD_THEME.textMuted, mt: 0.25 }}>
+                  {summary.tradingDays > 0 ? `${summary.tradingDays} 交易日` : '无数据'}
+                </Typography>
+              </Box>
+            );
+          })}
+        </Box>
       )}
 
       <Stack
@@ -212,12 +259,19 @@ export function PnlCalendarView({ points, granularity, year, month, onYearMonthC
         flexWrap="wrap"
         gap={1.5}
       >
-        <Typography sx={{ fontSize: 12, color: DASHBOARD_THEME.textSecondary, ...monoSx }}>
-          {granularity === 'year' ? `${year}年区间收益` : `${formatYearMonth(year, month)}区间收益`}：
-          <Box component="span" sx={{ fontWeight: 700, color: pctColor(periodSummary.periodReturnPct ?? 0), ml: 0.5 }}>
-            {periodSummary.periodReturnPct != null ? fmtPct(periodSummary.periodReturnPct) : '—'}
-          </Box>
-        </Typography>
+        {granularity !== 'year' && periodSummary && (
+          <Typography sx={{ fontSize: 12, color: DASHBOARD_THEME.textSecondary, ...monoSx }}>
+            {granularity === 'month' ? `${year}年区间收益` : `${formatYearMonth(year, month)}区间收益`}：
+            <Box component="span" sx={{ fontWeight: 700, color: pctColor(periodSummary.periodReturnPct ?? 0), ml: 0.5 }}>
+              {periodSummary.periodReturnPct != null ? fmtPct(periodSummary.periodReturnPct) : '—'}
+            </Box>
+          </Typography>
+        )}
+        {granularity === 'year' && (
+          <Typography sx={{ fontSize: 12, color: DASHBOARD_THEME.textSecondary, ...monoSx }}>
+            点击年份可下钻到月度视图
+          </Typography>
+        )}
         {benchPeriodPct != null && (
           <Typography sx={{ fontSize: 12, color: DASHBOARD_THEME.textMuted, ...monoSx }}>
             {INDEX_NAME}：

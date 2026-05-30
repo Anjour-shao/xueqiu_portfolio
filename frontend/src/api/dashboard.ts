@@ -3,13 +3,10 @@ import {
   AccountItem,
   CopyBacktestRequest,
   CopyBacktestResponse,
-  CubeCatalogStats,
+  StrategyCatalogItem,
+  StrategyCompareResponse,
   DashboardPayload,
-  DiscoverPortfoliosParams,
-  DiscoverPortfoliosResponse,
-  DiscoverStreamEvent,
   DeleteAccountResponse,
-  FollowPortfoliosResponse,
   ImportLogsPayload,
   ImportLogsResponse,
   DataFreshnessResponse,
@@ -138,18 +135,6 @@ export async function fetchDataFreshness() {
   return res.data;
 }
 
-export async function fetchCubeCatalogStats() {
-  const res = await api.get<CubeCatalogStats>('/api/cube-catalog/stats');
-  return res.data;
-}
-
-export async function resetCubeCatalogDiscovered() {
-  const res = await api.post<{ ok: boolean; message: string; reset_count: number }>(
-    '/api/cube-catalog/reset-discovered',
-  );
-  return res.data;
-}
-
 export async function syncQuotes() {
   const res = await api.post<SyncQuotesResponse>('/api/sync-quotes', {}, { timeout: 600000 });
   return res.data;
@@ -206,130 +191,34 @@ export async function streamSyncAll(
   return result;
 }
 
-/** 榜单组合目录同步（SSE，独立于全量同步） */
-export async function streamSyncCubeCatalog(
-  onLog: (item: SyncLogItem) => void,
-  signal?: AbortSignal,
-): Promise<{ ok: boolean; message?: string }> {
-  const res = await fetch('/api/sync-cube-catalog-stream', {
-    method: 'POST',
-    headers: { Accept: 'text/event-stream' },
-    signal,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(text || `榜单同步请求失败 (${res.status})`);
-  }
-  const reader = res.body?.getReader();
-  if (!reader) {
-    throw new Error('无法读取榜单同步日志流');
-  }
-
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let result: { ok: boolean; message?: string } = { ok: false };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split('\n\n');
-    buffer = chunks.pop() ?? '';
-    for (const chunk of chunks) {
-      for (const line of chunk.split('\n')) {
-        if (!line.startsWith('data: ')) continue;
-        const payload = JSON.parse(line.slice(6)) as SyncLogItem | SyncStreamDoneEvent;
-        if ('type' in payload && payload.type === 'done') {
-          result = { ok: payload.ok, message: payload.message };
-        } else {
-          onLog(payload as SyncLogItem);
-        }
-      }
-    }
-  }
-  return result;
-}
-
 /** 抄作业回测：合并全部 ZH 组合信号，单一账户模拟 */
 export async function runCopyBacktest(params?: CopyBacktestRequest) {
   const res = await api.post<CopyBacktestResponse>('/api/backtest-copy', params ?? {}, { timeout: 300000 });
   return res.data;
 }
 
-/** 挖组合（同步，适合小范围调试） */
-export async function discoverPortfolios(params: DiscoverPortfoliosParams) {
-  const res = await api.post<DiscoverPortfoliosResponse>('/api/discover-portfolios', params, { timeout: 600000 });
+export async function fetchBacktestStrategies() {
+  const res = await api.get<StrategyCatalogItem[]>('/api/backtest-strategies');
   return res.data;
 }
 
-/** 挖组合（SSE 进度 + 命中实时推送） */
-export async function streamDiscoverPortfolios(
-  params: DiscoverPortfoliosParams,
-  onEvent: (event: DiscoverStreamEvent) => void,
-  signal?: AbortSignal,
-): Promise<{ ok: boolean; message?: string; result?: DiscoverPortfoliosResponse }> {
-  const res = await fetch('/api/discover-portfolios-stream', {
-    method: 'POST',
-    headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-    signal,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(text || `挖组合请求失败 (${res.status})`);
-  }
-  const reader = res.body?.getReader();
-  if (!reader) {
-    throw new Error('无法读取挖组合日志流');
-  }
-
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let outcome: { ok: boolean; message?: string; result?: DiscoverPortfoliosResponse } = { ok: false };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split('\n\n');
-    buffer = chunks.pop() ?? '';
-    for (const chunk of chunks) {
-      for (const line of chunk.split('\n')) {
-        if (!line.startsWith('data: ')) continue;
-        const payload = JSON.parse(line.slice(6)) as DiscoverStreamEvent;
-        onEvent(payload);
-        if (payload.type === 'done') {
-          const { type: _t, ok, message, ...rest } = payload;
-          outcome = {
-            ok,
-            message,
-            result: ok
-              ? {
-                  scanned: rest.scanned ?? 0,
-                  matched_count: rest.matched_count ?? 0,
-                  not_found: rest.not_found ?? 0,
-                  filtered_out: rest.filtered_out ?? 0,
-                  items: rest.items ?? [],
-                  batch_start: rest.batch_start ?? null,
-                  batch_end: rest.batch_end ?? null,
-                  last_scanned_num: rest.last_scanned_num ?? null,
-                  next_checkpoint: rest.next_checkpoint ?? null,
-                }
-              : undefined,
-          };
-        }
-      }
-    }
-  }
-  return outcome;
-}
-
-export async function followPortfolios(accountCodes: string[], syncAfterFollow = true) {
-  const res = await api.post<FollowPortfoliosResponse>(
-    '/api/follow-portfolios',
+export async function compareBacktestStrategies(
+  strategyIds: string[],
+  options: {
+    initialCapital: number;
+    startDate?: string | null;
+    endDate?: string | null;
+    entrySweepDates?: string[];
+  },
+) {
+  const res = await api.post<StrategyCompareResponse>(
+    '/api/backtest-compare',
     {
-      account_codes: accountCodes,
-      sync_after_follow: syncAfterFollow,
+      strategy_ids: strategyIds,
+      initial_capital: options.initialCapital,
+      start_date: options.startDate || null,
+      end_date: options.endDate || null,
+      entry_sweep_dates: options.entrySweepDates?.length ? options.entrySweepDates : null,
     },
     { timeout: 600000 },
   );

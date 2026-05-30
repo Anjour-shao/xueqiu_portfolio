@@ -3,7 +3,6 @@ import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded';
 import { Box, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Typography } from '@mui/material';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { DiscoverProvider, useDiscover } from '../features/discover/DiscoverProvider';
 import { SyncProvider, useSync } from '../features/sync/SyncProvider';
 import { DASHBOARD_THEME } from '../features/dashboard/utils';
 import { NAV_ITEMS } from './navItems';
@@ -14,13 +13,11 @@ const STORAGE_KEY = 'xueqiu.sidebarCollapsed';
 
 function NavList({ collapsed }: { collapsed: boolean }) {
   const { running: syncRunning } = useSync();
-  const { running: discoverRunning } = useDiscover();
 
   return (
     <List sx={{ px: 1, py: 1.5 }}>
       {NAV_ITEMS.map((item) => {
-        const showDot =
-          (item.path === '/sync' && syncRunning) || (item.path === '/discover' && discoverRunning);
+        const showDot = item.path === '/sync' && syncRunning;
         return (
           <ListItemButton
             key={item.path}
@@ -103,9 +100,7 @@ export function AppShell() {
 
   return (
     <SyncProvider>
-      <DiscoverProvider>
-        <AppShellLayout collapsed={collapsed} onToggleCollapsed={() => setCollapsed((v) => !v)} width={width} />
-      </DiscoverProvider>
+      <AppShellLayout collapsed={collapsed} onToggleCollapsed={() => setCollapsed((v) => !v)} width={width} />
     </SyncProvider>
   );
 }
