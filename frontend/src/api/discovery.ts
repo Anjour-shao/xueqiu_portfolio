@@ -27,10 +27,54 @@ export async function patchDiscoveryCube(
 }
 
 export async function importDiscoveryCube(accountCode: string) {
-  const res = await api.post<{ ok: boolean; message: string; account_code: string }>(
-    `/api/discovery/cubes/${encodeURIComponent(accountCode)}/import`,
-  );
-  return res.data;
+  const result = await streamDiscoveryImport([accountCode]);
+  return result;
+}
+
+export async function streamDiscoveryImport(
+  accountCodes: string[],
+  onLog?: (item: SyncLogItem) => void,
+  options?: { signal?: AbortSignal },
+): Promise<{ ok: boolean; message?: string }> {
+  const codes = accountCodes.map((c) => c.trim().toUpperCase()).filter(Boolean);
+  const res = await fetch('/api/discovery/import-stream', {
+    method: 'POST',
+    headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account_codes: codes }),
+    signal: options?.signal,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `入库请求失败 (${res.status})`);
+  }
+  const reader = res.body?.getReader();
+  if (!reader) {
+    throw new Error('无法读取入库日志流');
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result: { ok: boolean; message?: string } = { ok: false };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const chunks = buffer.split('\n\n');
+    buffer = chunks.pop() ?? '';
+    for (const chunk of chunks) {
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = JSON.parse(line.slice(6)) as SyncLogItem | SyncStreamDoneEvent;
+        if ('type' in payload && payload.type === 'done') {
+          result = { ok: payload.ok, message: payload.message };
+        } else if (onLog) {
+          onLog(payload as SyncLogItem);
+        }
+      }
+    }
+  }
+  return result;
 }
 
 export async function streamDiscoveryMine(

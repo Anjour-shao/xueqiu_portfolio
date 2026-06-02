@@ -507,6 +507,10 @@ class DiscoveryMineRequest(BaseModel):
     max_depth: int = 1
 
 
+class DiscoveryImportRequest(BaseModel):
+    account_codes: list[str] = Field(default_factory=list)
+
+
 class DiscoveryMineResponse(BaseModel):
     ok: bool
     message: str

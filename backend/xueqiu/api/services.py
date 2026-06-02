@@ -951,26 +951,143 @@ def patch_discovery_cube(
     return update_mined_cube_selection(account_code, selected=selected, note=note)
 
 
-def import_discovery_cube(account_code: str) -> dict[str, Any]:
+def import_discovery_cube(account_code: str, *, sink: Any | None = None) -> dict[str, Any]:
+    import random
+    import time
+
     from xueqiu.domain.discovery_store import mark_mined_cube_imported, update_mined_cube_selection
+    from xueqiu.integrations.xueqiu.client import XueQiuApiError
+    from xueqiu.sync.sync_log import LogSink
 
     code = account_code.strip().upper()
+    if not code:
+        raise ValueError("组合代码不能为空")
+
+    log = sink if isinstance(sink, LogSink) else LogSink()
     row = update_mined_cube_selection(code, selected=1)
     if row.get("imported_at"):
+        msg = f"组合 {code} 已入库"
+        log.info(msg)
         return {
             "ok": True,
-            "message": f"组合 {code} 已入库",
+            "message": msg,
             "account_code": code,
             "sync": {},
         }
-    sync_result = sync_from_xueqiu(code)
+
+    name = str(row.get("account_name") or code)
+    log.info(f"▶ 开始入库 {code}（{name}）…")
+    time.sleep(random.uniform(1.2, 2.5))
+    try:
+        sync_result = sync_from_xueqiu(code, sink=log)
+    except XueQiuApiError as exc:
+        msg = str(exc)
+        if "Cookie 已失效" in msg or "登录态失效" in msg or "400016" in msg:
+            raise RuntimeError(msg) from exc
+        if any(token in msg for token in ("400", "429", "502", "503")):
+            raise RuntimeError(f"雪球限流或暂不可用，请稍后重试：{msg}") from exc
+        raise RuntimeError(msg) from exc
+
     mark_mined_cube_imported(code)
+    message = str(sync_result.get("message") or "入库完成")
+    log.success(f"■ {code} {message}")
     return {
         "ok": bool(sync_result.get("ok", True)),
-        "message": str(sync_result.get("message") or "入库完成"),
+        "message": message,
         "account_code": code,
         "sync": sync_result,
     }
+
+
+def iter_discovery_import_stream(
+    account_codes: list[str],
+    cancel_event: Any | None = None,
+):
+    import json
+    import queue
+    import random
+    import threading
+    import time
+
+    cancel = cancel_event if isinstance(cancel_event, threading.Event) else threading.Event()
+    event_queue: queue.Queue = queue.Queue()
+    codes = []
+    seen: set[str] = set()
+    for raw in account_codes:
+        code = str(raw or "").strip().upper()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        codes.append(code)
+
+    def emit(item: dict[str, Any]) -> None:
+        event_queue.put(item)
+
+    def worker() -> None:
+        from xueqiu.sync.sync_log import LogSink
+
+        sink = LogSink(emit=emit)
+        ok_count = 0
+        fail_count = 0
+        if not codes:
+            sink.warn("未选择任何组合")
+            emit({"type": "done", "ok": False, "message": "未选择任何组合"})
+            event_queue.put(None)
+            return
+
+        sink.info(f"▶ 批量入库：共 {len(codes)} 个组合（逐个同步，遇限流会自动重试）")
+        for idx, code in enumerate(codes, start=1):
+            if cancel.is_set():
+                sink.warn("■ 入库已停止")
+                emit(
+                    {
+                        "type": "done",
+                        "ok": False,
+                        "message": f"已停止：成功 {ok_count}，失败 {fail_count}",
+                    }
+                )
+                event_queue.put(None)
+                return
+            sink.info(f"── [{idx}/{len(codes)}] {code} ──")
+            try:
+                import_discovery_cube(code, sink=sink)
+                ok_count += 1
+            except Exception as exc:
+                fail_count += 1
+                sink.error(f"✗ {code} 入库失败：{exc}")
+            if idx < len(codes) and not cancel.is_set():
+                pause = random.uniform(2.5, 4.0)
+                sink.info(f"暂停 {pause:.0f}s 后继续下一个…")
+                time.sleep(pause)
+
+        summary = f"批量入库完成：成功 {ok_count}，失败 {fail_count}"
+        if fail_count == 0:
+            sink.success(f"■ {summary}")
+            emit({"type": "done", "ok": True, "message": summary})
+        else:
+            sink.warn(f"■ {summary}")
+            emit({"type": "done", "ok": ok_count > 0, "message": summary})
+        event_queue.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    while True:
+        if cancel.is_set():
+            try:
+                while True:
+                    item = event_queue.get_nowait()
+                    if item is None:
+                        return
+                    yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+            except queue.Empty:
+                return
+        try:
+            item = event_queue.get(timeout=0.3)
+        except queue.Empty:
+            continue
+        if item is None:
+            break
+        yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
 
 
 def run_discovery_mine_api(*, max_depth: int = 1, sink: Any | None = None, cancel_event: Any | None = None) -> dict[str, Any]:

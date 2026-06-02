@@ -19,7 +19,12 @@ from xueqiu.integrations.xueqiu.portfolio import (
     fetch_rebalance_events,
     portfolio_has_non_a_share,
 )
-from xueqiu.integrations.xueqiu.watchlist import CubeShowInfo, fetch_cube_show, fetch_user_watchlist_cubes
+from xueqiu.integrations.xueqiu.watchlist import (
+    CubeShowInfo,
+    fetch_cube_show,
+    fetch_user_cube_watchlist_meta_count,
+    fetch_user_watchlist_cubes,
+)
 from xueqiu.storage.db import accounts_table, get_conn, init_db, mined_cubes_table
 from xueqiu.sync.sync_cancel import check_cancel
 from xueqiu.sync.sync_log import LogSink
@@ -192,6 +197,8 @@ def _enrich_cube_metrics(
             extra_reasons.append("inactive_6m")
     except XueQiuApiError:
         extra_reasons.append("rebalance_error")
+    except Exception:
+        extra_reasons.append("rebalance_error")
 
     time.sleep(random.uniform(*_PAUSE_METRIC))
     try:
@@ -204,6 +211,8 @@ def _enrich_cube_metrics(
                 extra_reasons.append("loss")
     except (XueQiuApiError, ValueError, RuntimeError):
         extra_reasons.append("nav_error")
+    except Exception:
+        extra_reasons.append("nav_error")
 
     time.sleep(random.uniform(*_PAUSE_METRIC))
     try:
@@ -212,6 +221,8 @@ def _enrich_cube_metrics(
             if "non_a" not in extra_reasons:
                 extra_reasons.append("non_a")
     except XueQiuApiError:
+        extra_reasons.append("holdings_error")
+    except Exception:
         extra_reasons.append("holdings_error")
 
     return cum_return_pct, nav_latest_date, latest_rebalance_time, rebalance_count_6m, has_non_a, extra_reasons
@@ -357,131 +368,146 @@ def run_discovery_mine(
 
         try:
             watchlist = fetch_user_watchlist_cubes(item.uid, client=api)
+            meta_count = fetch_user_cube_watchlist_meta_count(item.uid, client=api)
         except Exception as exc:
             stats.errors += 1
-            log.warn(f"用户 {owner_label} 自选拉取失败: {exc}")
+            log.warn(f"用户 {owner_label} 自选组合拉取失败: {exc}")
             continue
 
         stats.users_crawled += 1
         db_crawled_uids.add(item.uid)
-        log.info(f"用户 {owner_label} 自选 {len(watchlist)} 个组合")
+        if watchlist:
+            log.info(f"用户 {owner_label} 自选 {len(watchlist)} 个组合")
+        elif meta_count:
+            log.info(
+                f"用户 {owner_label} 自选 0 个组合"
+                f"（元数据显示 {meta_count} 个，可能因隐私设置不可见；已排除管理组合）"
+            )
+        else:
+            log.info(f"用户 {owner_label} 自选 0 个组合")
 
         consecutive_show_fail = 0
         for code, list_name in watchlist:
             check_cancel(cancel_event)
             stats.cubes_seen += 1
-            if code in in_db:
-                stats.skipped_in_db += 1
-                continue
-
-            if _should_skip_show_fetch(code, mined_index):
-                stats.skipped_cached += 1
-                cached = mined_index.get(code, {})
-                show = CubeShowInfo(
-                    account_code=code,
-                    account_name=list_name,
-                    owner_uid=cached.get("owner_uid"),
-                    owner_name=None,
-                    market=cached.get("cube_market"),
-                )
-            else:
-                try:
-                    show = fetch_cube_show(code, client=api)
-                    consecutive_show_fail = 0
-                except Exception as exc:
-                    stats.errors += 1
-                    stats.show_fail += 1
-                    consecutive_show_fail += 1
-                    if consecutive_show_fail >= _BURST_FAIL_THRESHOLD:
-                        extra = random.uniform(*_BURST_FAIL_EXTRA)
-                        log.warn(f"  连续限流，暂停 {extra:.0f}s…")
-                        time.sleep(extra)
-                        consecutive_show_fail = 0
-                    log.warn(f"  {code} show 失败（将记入待补全）: {exc}")
-                    is_new, _ = _upsert_mined_cube(
-                        code=code,
-                        name=list_name,
-                        owner_uid=None,
-                        owner_name=None,
-                        source_user_uid=item.uid,
-                        source_account_code=item.source_account_code,
-                        depth=item.depth,
-                        cum_return_pct=None,
-                        nav_latest_date=None,
-                        latest_rebalance_time=None,
-                        rebalance_count_6m=None,
-                        cube_market=None,
-                        has_non_a_share=False,
-                        auto_pass=False,
-                        reject_reasons=["show_error"],
-                    )
-                    if is_new:
-                        stats.cubes_new += 1
-                    mined_index[code] = {"owner_uid": None, "reject_reasons": ["show_error"]}
-                    time.sleep(random.uniform(*_PAUSE_CUBE))
+            try:
+                if code in in_db:
+                    stats.skipped_in_db += 1
                     continue
 
-            name = show.account_name or list_name
-            reasons, base_ok = _evaluate_cube(
-                code=code,
-                owner_uid=show.owner_uid,
-                source_user_uid=item.uid,
-                in_db=in_db,
-            )
-            if "in_db" in reasons:
-                stats.skipped_in_db += 1
-                continue
-
-            cube_market = show.market
-            cum_return_pct, nav_latest_date, latest_rebalance_time, rebalance_count_6m, has_non_a, metric_reasons = (
-                _enrich_cube_metrics(code, api, cube_market=cube_market)
-            )
-            reasons.extend(metric_reasons)
-            auto_pass = base_ok and not metric_reasons
-
-            is_new, _ = _upsert_mined_cube(
-                code=code,
-                name=name,
-                owner_uid=show.owner_uid,
-                owner_name=show.owner_name,
-                source_user_uid=item.uid,
-                source_account_code=item.source_account_code,
-                depth=item.depth,
-                cum_return_pct=cum_return_pct,
-                nav_latest_date=nav_latest_date,
-                latest_rebalance_time=latest_rebalance_time,
-                rebalance_count_6m=rebalance_count_6m,
-                cube_market=cube_market,
-                has_non_a_share=has_non_a,
-                auto_pass=auto_pass,
-                reject_reasons=reasons,
-            )
-            if is_new:
-                stats.cubes_new += 1
-            else:
-                stats.cubes_updated += 1
-            if auto_pass:
-                stats.auto_pass_count += 1
-                if (
-                    show.owner_uid is not None
-                    and item.depth < max_depth
-                    and show.owner_uid not in db_crawled_uids
-                    and show.owner_uid not in processed_run
-                ):
-                    queue.append(
-                        _QueueItem(
-                            uid=show.owner_uid,
-                            depth=item.depth + 1,
-                            source_account_code=code,
-                        )
+                if _should_skip_show_fetch(code, mined_index):
+                    stats.skipped_cached += 1
+                    cached = mined_index.get(code, {})
+                    show = CubeShowInfo(
+                        account_code=code,
+                        account_name=list_name,
+                        owner_uid=cached.get("owner_uid"),
+                        owner_name=None,
+                        market=cached.get("cube_market"),
                     )
+                else:
+                    try:
+                        show = fetch_cube_show(code, client=api)
+                        consecutive_show_fail = 0
+                    except Exception as exc:
+                        stats.errors += 1
+                        stats.show_fail += 1
+                        consecutive_show_fail += 1
+                        if consecutive_show_fail >= _BURST_FAIL_THRESHOLD:
+                            extra = random.uniform(*_BURST_FAIL_EXTRA)
+                            log.warn(f"  连续失败，暂停 {extra:.0f}s…")
+                            time.sleep(extra)
+                            consecutive_show_fail = 0
+                        log.warn(f"  {code} show 失败（将记入待补全）: {exc}")
+                        is_new, _ = _upsert_mined_cube(
+                            code=code,
+                            name=list_name,
+                            owner_uid=None,
+                            owner_name=None,
+                            source_user_uid=item.uid,
+                            source_account_code=item.source_account_code,
+                            depth=item.depth,
+                            cum_return_pct=None,
+                            nav_latest_date=None,
+                            latest_rebalance_time=None,
+                            rebalance_count_6m=None,
+                            cube_market=None,
+                            has_non_a_share=False,
+                            auto_pass=False,
+                            reject_reasons=["show_error"],
+                        )
+                        if is_new:
+                            stats.cubes_new += 1
+                        mined_index[code] = {"owner_uid": None, "reject_reasons": ["show_error"]}
+                        time.sleep(random.uniform(*_PAUSE_CUBE))
+                        continue
 
-            mined_index[code] = {
-                "owner_uid": show.owner_uid,
-                "reject_reasons": reasons,
-                "cube_market": cube_market,
-            }
-            time.sleep(random.uniform(*_PAUSE_CUBE))
+                name = show.account_name or list_name
+                reasons, base_ok = _evaluate_cube(
+                    code=code,
+                    owner_uid=show.owner_uid,
+                    source_user_uid=item.uid,
+                    in_db=in_db,
+                )
+                if "in_db" in reasons:
+                    stats.skipped_in_db += 1
+                    continue
+
+                cube_market = show.market
+                cum_return_pct, nav_latest_date, latest_rebalance_time, rebalance_count_6m, has_non_a, metric_reasons = (
+                    _enrich_cube_metrics(code, api, cube_market=cube_market)
+                )
+                reasons.extend(metric_reasons)
+                auto_pass = base_ok and not metric_reasons
+
+                is_new, _ = _upsert_mined_cube(
+                    code=code,
+                    name=name,
+                    owner_uid=show.owner_uid,
+                    owner_name=show.owner_name,
+                    source_user_uid=item.uid,
+                    source_account_code=item.source_account_code,
+                    depth=item.depth,
+                    cum_return_pct=cum_return_pct,
+                    nav_latest_date=nav_latest_date,
+                    latest_rebalance_time=latest_rebalance_time,
+                    rebalance_count_6m=rebalance_count_6m,
+                    cube_market=cube_market,
+                    has_non_a_share=has_non_a,
+                    auto_pass=auto_pass,
+                    reject_reasons=reasons,
+                )
+                if is_new:
+                    stats.cubes_new += 1
+                else:
+                    stats.cubes_updated += 1
+                if auto_pass:
+                    stats.auto_pass_count += 1
+                    if (
+                        show.owner_uid is not None
+                        and item.depth < max_depth
+                        and show.owner_uid not in db_crawled_uids
+                        and show.owner_uid not in processed_run
+                    ):
+                        queue.append(
+                            _QueueItem(
+                                uid=show.owner_uid,
+                                depth=item.depth + 1,
+                                source_account_code=code,
+                            )
+                        )
+
+                mined_index[code] = {
+                    "owner_uid": show.owner_uid,
+                    "reject_reasons": reasons,
+                    "cube_market": cube_market,
+                }
+                time.sleep(random.uniform(*_PAUSE_CUBE))
+            except Exception as exc:
+                stats.errors += 1
+                log.warn(f"  {code} 处理失败（已跳过）: {exc}")
+                time.sleep(random.uniform(*_PAUSE_CUBE))
+                continue
 
         time.sleep(random.uniform(*_PAUSE_USER))
 

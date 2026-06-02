@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 import requests
+from requests.exceptions import RequestException
 
 from xueqiu.integrations.xueqiu.auth import load_cookie
 
@@ -24,10 +25,59 @@ class XueQiuApiError(RuntimeError):
     pass
 
 
+def _parse_xueqiu_error_body(resp: requests.Response) -> tuple[str | None, str | None]:
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    code = str(payload.get("error_code") or "").strip() or None
+    desc = str(payload.get("error_description") or "").strip() or None
+    return code, desc
+
+
+def _cookie_invalid_message(*, error_code: str | None, error_desc: str | None, sym_hint: str) -> str | None:
+    if error_code == "400016":
+        return (
+            f"雪球 Cookie 已失效（error_code={error_code}），"
+            f"请运行 python ../scripts/xueqiu_login.py 重新登录后再试{sym_hint}"
+        )
+    if error_desc and "重新登录" in error_desc:
+        return (
+            f"雪球登录态失效：{error_desc}。"
+            f"请运行 python ../scripts/xueqiu_login.py 重新登录{sym_hint}"
+        )
+    return None
+
+
+def _is_cookie_invalid_error(exc: XueQiuApiError) -> bool:
+    msg = str(exc)
+    return "Cookie 已失效" in msg or "登录态失效" in msg or "400016" in msg or "重新登录" in msg
+
+
+def _is_retryable_error(exc: BaseException) -> bool:
+    if isinstance(exc, RequestException):
+        return True
+    if isinstance(exc, XueQiuApiError):
+        if _is_cookie_invalid_error(exc):
+            return False
+        msg = str(exc)
+        if any(code in msg for code in ("10022", "10020", "error_code=10022", "error_code=10020")):
+            return False
+        return any(token in msg for token in ("400", "429", "502", "503", "网络请求失败"))
+    return False
+
+
+def _network_error_message(exc: RequestException, *, sym_hint: str = "") -> str:
+    return f"网络请求失败{sym_hint}: {exc}"
+
+
 class XueQiuApiClient:
     def __init__(self, cookie: str | None = None, *, timeout: float = 20.0) -> None:
         self.timeout = timeout
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update(DEFAULT_HEADERS)
         self.session.cookies.update(self._parse_cookie(cookie or load_cookie()))
         self._warmed = False
@@ -43,10 +93,25 @@ class XueQiuApiClient:
             result[name.strip()] = value.strip()
         return result
 
+    def _http_get(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        sym_hint: str = "",
+    ) -> requests.Response:
+        try:
+            return self.session.get(
+                url, params=params, headers=headers, timeout=self.timeout
+            )
+        except RequestException as exc:
+            raise XueQiuApiError(_network_error_message(exc, sym_hint=sym_hint)) from exc
+
     def warm_up(self) -> None:
         if self._warmed:
             return
-        resp = self.session.get("https://xueqiu.com/", timeout=self.timeout)
+        resp = self._http_get("https://xueqiu.com/")
         resp.raise_for_status()
         self._warmed = True
 
@@ -59,23 +124,34 @@ class XueQiuApiClient:
         warm_symbol: str | None = None,
     ) -> Any:
         self.warm_up()
-        if warm_symbol:
-            sym = warm_symbol.strip().upper()
-            self.session.get(f"https://xueqiu.com/S/{sym}", timeout=self.timeout)
-        extra_headers = {"Referer": referer} if referer else None
-        resp = self.session.get(
-            url, params=params, headers=extra_headers, timeout=self.timeout
-        )
-        sc = resp.status_code
         symbol = (params or {}).get("cube_symbol", "")
         sym_hint = f" {symbol}" if symbol else ""
+        if warm_symbol:
+            sym = warm_symbol.strip().upper()
+            try:
+                self._http_get(f"https://xueqiu.com/S/{sym}", sym_hint=f" {sym}")
+            except XueQiuApiError:
+                pass
+        extra_headers = {"Referer": referer} if referer else None
+        resp = self._http_get(url, params=params, headers=extra_headers, sym_hint=sym_hint)
+        sc = resp.status_code
         if sc in {401, 403}:
             raise XueQiuApiError(f"认证失败 ({sc})，请重新导出 Cookie")
         if sc == 429:
             raise XueQiuApiError(f"HTTP 429 限流{sym_hint}")
         if sc == 400:
+            err_code, err_desc = _parse_xueqiu_error_body(resp)
+            cookie_msg = _cookie_invalid_message(
+                error_code=err_code,
+                error_desc=err_desc,
+                sym_hint=sym_hint,
+            )
+            if cookie_msg:
+                raise XueQiuApiError(cookie_msg)
+            code_part = f" error_code={err_code}" if err_code else ""
+            desc_part = f" {err_desc}" if err_desc else ""
             raise XueQiuApiError(
-                f"HTTP 400（多为请求过快或短暂限流，网页上组合仍可能存在）{sym_hint}"
+                f"HTTP 400{code_part}{sym_hint}{desc_part}".strip()
             )
         if sc in {502, 503}:
             raise XueQiuApiError(f"HTTP {sc} 服务暂不可用{sym_hint}")
@@ -101,8 +177,8 @@ class XueQiuApiClient:
         max_retries: int = 5,
         delay: tuple[float, float] = (1.4, 2.6),
     ) -> Any:
-        """雪球 400/429/502/503 时退避重试。"""
-        last: XueQiuApiError | None = None
+        """雪球 400/429/502/503 及网络抖动时退避重试。"""
+        last: BaseException | None = None
         for attempt in range(max_retries):
             try:
                 return self.get_json(
@@ -113,10 +189,9 @@ class XueQiuApiClient:
                 )
             except XueQiuApiError as exc:
                 last = exc
-                msg = str(exc)
-                if attempt < max_retries - 1 and any(
-                    token in msg for token in ("400", "429", "502", "503")
-                ):
+                if not _is_retryable_error(exc):
+                    raise
+                if attempt < max_retries - 1:
                     time.sleep(random.uniform(*delay) * (attempt + 1))
                     continue
                 raise

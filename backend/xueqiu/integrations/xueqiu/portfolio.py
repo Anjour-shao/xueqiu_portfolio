@@ -9,10 +9,11 @@ from collections.abc import Callable
 from typing import Any
 
 from xueqiu.domain.codes import is_cn_a_share, is_hk_us_or_non_a_share, to_xueqiu_code
-from xueqiu.integrations.xueqiu.client import XueQiuApiClient, XueQiuApiError
+from xueqiu.integrations.xueqiu.client import XueQiuApiClient, XueQiuApiError, _is_retryable_error
 
 PORTFOLIO_ID_RE = re.compile(r"^ZH\d+$", re.IGNORECASE)
 REBALANCE_HISTORY_URL = "https://xueqiu.com/cubes/rebalancing/history.json"
+REBALANCE_SHOW_ORIGIN_URL = "https://xueqiu.com/cubes/rebalancing/show_origin.json"
 CUBE_NAV_URL = "https://xueqiu.com/cubes/nav_daily/all.json"
 CUBE_SHOW_URL = "https://xueqiu.com/cubes/show.json"
 CUBE_QUOTE_URL = "https://xueqiu.com/cubes/quote.json"
@@ -257,7 +258,11 @@ def _format_rebalance_time(updated_at: Any) -> str:
 
 def _fetch_portfolio_name(client: XueQiuApiClient, portfolio_id: str) -> str:
     try:
-        data = client.get_json(CUBE_NAV_URL, params={"cube_symbol": portfolio_id})
+        data = client.get_json_with_retry(
+            CUBE_NAV_URL,
+            params={"cube_symbol": portfolio_id},
+            warm_symbol=portfolio_id,
+        )
     except XueQiuApiError:
         return portfolio_id
     if isinstance(data, list) and data:
@@ -315,6 +320,109 @@ def record_to_trade(rebalance_time: str, record: dict[str, Any]) -> dict[str, An
     }
 
 
+def _portfolio_page_referer(portfolio_id: str) -> str:
+    return f"https://xueqiu.com/P/{portfolio_id}"
+
+
+def _history_api_blocked(exc: Exception) -> bool:
+    msg = str(exc)
+    return any(token in msg for token in ("10022", "10020", "error_code=10022", "error_code=10020"))
+
+
+def _fetch_cube_show_snapshot(api: XueQiuApiClient, portfolio_id: str) -> dict[str, Any]:
+    data = api.get_json_with_retry(
+        CUBE_SHOW_URL,
+        params={"symbol": portfolio_id},
+        warm_symbol=portfolio_id,
+        referer=_portfolio_page_referer(portfolio_id),
+    )
+    if not isinstance(data, dict):
+        raise XueQiuApiError(f"组合 {portfolio_id} show 返回异常")
+    return data
+
+
+def _start_rb_id_from_show(show: dict[str, Any]) -> int | None:
+    for key in ("last_rb_id",):
+        value = show.get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                pass
+    last = show.get("last_rebalancing")
+    if isinstance(last, dict) and last.get("id") is not None:
+        try:
+            return int(last["id"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _fetch_rebalance_raw_batch(
+    api: XueQiuApiClient,
+    portfolio_id: str,
+    rb_id: int,
+) -> dict[str, Any]:
+    data = api.get_json_with_retry(
+        REBALANCE_SHOW_ORIGIN_URL,
+        params={"rb_id": rb_id, "cube_symbol": portfolio_id},
+        warm_symbol=portfolio_id,
+        referer=_portfolio_page_referer(portfolio_id),
+        max_retries=3,
+        delay=(0.8, 1.4),
+    )
+    batch = data.get("rebalancing") if isinstance(data, dict) else None
+    if not isinstance(batch, dict):
+        raise XueQiuApiError(f"组合 {portfolio_id} show_origin 返回异常 rb_id={rb_id}")
+    return batch
+
+
+def _iter_manual_rebalance_batches_chain(
+    api: XueQiuApiClient,
+    portfolio_id: str,
+    portfolio_name: str,
+    *,
+    start_rb_id: int | None = None,
+    max_batches: int = 3000,
+    cutoff: datetime | None = None,
+) -> list[dict[str, Any]]:
+    show = _fetch_cube_show_snapshot(api, portfolio_id)
+    rb_id = start_rb_id if start_rb_id is not None else _start_rb_id_from_show(show)
+    if rb_id is None:
+        return []
+
+    name = str(show.get("name") or portfolio_name or portfolio_id)
+    seen_ids: set[int] = set()
+    batches_out: list[dict[str, Any]] = []
+    seen_times: set[str] = set()
+
+    while rb_id is not None and rb_id not in seen_ids and len(seen_ids) < max_batches:
+        seen_ids.add(rb_id)
+        batch = _fetch_rebalance_raw_batch(api, portfolio_id, rb_id)
+        if cutoff is not None:
+            try:
+                dt = datetime.strptime(_format_rebalance_time(batch.get("updated_at"))[:19], "%Y-%m-%d %H:%M:%S")
+                if dt < cutoff:
+                    break
+            except (ValueError, RuntimeError):
+                pass
+        crawled = _parse_rebalance_batch(portfolio_id, name, batch)
+        if crawled is not None:
+            rt = crawled["rebalance_time"]
+            if rt not in seen_times:
+                seen_times.add(rt)
+                batches_out.append(crawled)
+        prev = batch.get("prev_bebalancing_id")
+        try:
+            rb_id = int(prev) if prev is not None else None
+        except (TypeError, ValueError):
+            break
+        time.sleep(random.uniform(0.45, 0.9))
+
+    batches_out.sort(key=lambda x: x["rebalance_time"])
+    return batches_out
+
+
 def fetch_rebalance_events(
     portfolio_id: str,
     client: XueQiuApiClient | None = None,
@@ -330,42 +438,79 @@ def fetch_rebalance_events(
     events: list[dict[str, Any]] = []
     history_has_non_a = False
 
-    for page in range(1, max_pages + 1):
-        data = api.get_json(
-            REBALANCE_HISTORY_URL,
-            params={"cube_symbol": portfolio_id, "page": page, "count": page_size},
-        )
-        batches = data.get("list") if isinstance(data, dict) else None
-        if not isinstance(batches, list) or not batches:
-            break
-
-        for batch in batches:
-            if not isinstance(batch, dict) or batch.get("status") != "success":
-                continue
-            has_manual, has_non_a = _classify_rebalance_batch(batch)
-            if has_non_a:
-                history_has_non_a = True
-            if not has_manual:
-                continue
-            try:
-                trade_time = _format_rebalance_time(batch.get("updated_at"))
-                dt = datetime.strptime(trade_time[:19], "%Y-%m-%d %H:%M:%S")
-            except (ValueError, RuntimeError):
-                continue
-            if dt < cutoff:
-                continue
-            events.append(
-                {
-                    "trade_time": trade_time,
-                    "month_key": trade_time[:7],
-                    "timestamp": dt.timestamp(),
-                }
+    try:
+        for page in range(1, max_pages + 1):
+            data = _get_json_with_retry(
+                api,
+                REBALANCE_HISTORY_URL,
+                params={"cube_symbol": portfolio_id, "page": page, "count": page_size},
+                warm_symbol=portfolio_id if page == 1 else None,
             )
+            batches = data.get("list") if isinstance(data, dict) else None
+            if not isinstance(batches, list) or not batches:
+                break
 
-        if len(batches) < page_size:
-            break
-        if page < max_pages:
-            time.sleep(random.uniform(0.35, 0.7))
+            for batch in batches:
+                if not isinstance(batch, dict) or batch.get("status") != "success":
+                    continue
+                has_manual, has_non_a = _classify_rebalance_batch(batch)
+                if has_non_a:
+                    history_has_non_a = True
+                if not has_manual:
+                    continue
+                try:
+                    trade_time = _format_rebalance_time(batch.get("updated_at"))
+                    dt = datetime.strptime(trade_time[:19], "%Y-%m-%d %H:%M:%S")
+                except (ValueError, RuntimeError):
+                    continue
+                if dt < cutoff:
+                    continue
+                events.append(
+                    {
+                        "trade_time": trade_time,
+                        "month_key": trade_time[:7],
+                        "timestamp": dt.timestamp(),
+                    }
+                )
+
+            if len(batches) < page_size:
+                break
+            if page < max_pages:
+                time.sleep(random.uniform(0.35, 0.7))
+    except XueQiuApiError as exc:
+        if not _history_api_blocked(exc):
+            raise
+        show = _fetch_cube_show_snapshot(api, portfolio_id)
+        start_rb_id = _start_rb_id_from_show(show)
+        rb_id = start_rb_id
+        seen_ids: set[int] = set()
+        while rb_id is not None and rb_id not in seen_ids and len(seen_ids) < max_pages * page_size * 3:
+            seen_ids.add(rb_id)
+            batch = _fetch_rebalance_raw_batch(api, portfolio_id, rb_id)
+            if batch.get("status") == "success":
+                has_manual, has_non_a = _classify_rebalance_batch(batch)
+                if has_non_a:
+                    history_has_non_a = True
+                if has_manual:
+                    try:
+                        trade_time = _format_rebalance_time(batch.get("updated_at"))
+                        dt = datetime.strptime(trade_time[:19], "%Y-%m-%d %H:%M:%S")
+                        if dt >= cutoff:
+                            events.append(
+                                {
+                                    "trade_time": trade_time,
+                                    "month_key": trade_time[:7],
+                                    "timestamp": dt.timestamp(),
+                                }
+                            )
+                    except (ValueError, RuntimeError):
+                        pass
+            prev = batch.get("prev_bebalancing_id")
+            try:
+                rb_id = int(prev) if prev is not None else None
+            except (TypeError, ValueError):
+                break
+            time.sleep(random.uniform(0.25, 0.55))
 
     events.sort(key=lambda x: float(x["timestamp"]), reverse=True)
     return events, history_has_non_a
@@ -417,18 +562,21 @@ def _get_json_with_retry(
     url: str,
     params: dict[str, Any] | None = None,
     *,
-    max_retries: int = 4,
+    warm_symbol: str | None = None,
+    max_retries: int = 5,
 ) -> Any:
     """雪球接口 400/429 时自动退避重试。"""
     last: XueQiuApiError | None = None
     for attempt in range(max_retries):
         try:
-            return api.get_json(url, params=params)
+            referer = _portfolio_page_referer(str((params or {}).get("cube_symbol") or "")) if (params or {}).get("cube_symbol") else None
+            return api.get_json(url, params=params, warm_symbol=warm_symbol, referer=referer)
         except XueQiuApiError as exc:
             last = exc
-            msg = str(exc)
-            if attempt < max_retries - 1 and any(token in msg for token in ("400", "429", "502", "503")):
-                time.sleep(random.uniform(1.2, 2.2) * (attempt + 1))
+            if not _is_retryable_error(exc):
+                raise
+            if attempt < max_retries - 1:
+                time.sleep(random.uniform(1.4, 2.6) * (attempt + 1))
                 continue
             raise
     if last is not None:
@@ -451,39 +599,51 @@ def fetch_portfolio_rebalance_all(
     seen_times: set[str] = set()
     batches_out: list[dict[str, Any]] = []
 
-    for page in range(1, max_pages + 1):
+    try:
+        for page in range(1, max_pages + 1):
+            if on_progress is not None:
+                on_progress(page, len(batches_out))
+            data = _get_json_with_retry(
+                api,
+                REBALANCE_HISTORY_URL,
+                params={"cube_symbol": portfolio_id, "page": page, "count": page_size},
+                warm_symbol=portfolio_id if page == 1 else None,
+            )
+            raw_batches = data.get("list") if isinstance(data, dict) else None
+            if not isinstance(raw_batches, list) or not raw_batches:
+                break
+
+            for batch in raw_batches:
+                if not isinstance(batch, dict) or batch.get("status") != "success":
+                    continue
+                crawled = _parse_rebalance_batch(portfolio_id, portfolio_name, batch)
+                if crawled is None:
+                    continue
+                rt = crawled["rebalance_time"]
+                if rt in seen_times:
+                    continue
+                seen_times.add(rt)
+                batches_out.append(crawled)
+
+            if on_progress is not None:
+                on_progress(page, len(batches_out))
+
+            if len(raw_batches) < page_size:
+                break
+            if page < max_pages:
+                time.sleep(random.uniform(0.55, 1.05))
+    except XueQiuApiError as exc:
+        if not _history_api_blocked(exc):
+            raise
         if on_progress is not None:
-            on_progress(page, len(batches_out))
-        data = _get_json_with_retry(
+            on_progress(1, 0)
+        batches_out = _iter_manual_rebalance_batches_chain(
             api,
-            REBALANCE_HISTORY_URL,
-            params={"cube_symbol": portfolio_id, "page": page, "count": page_size},
+            portfolio_id,
+            portfolio_name,
         )
-        raw_batches = data.get("list") if isinstance(data, dict) else None
-        if not isinstance(raw_batches, list) or not raw_batches:
-            break
-
-        page_added = 0
-        for batch in raw_batches:
-            if not isinstance(batch, dict) or batch.get("status") != "success":
-                continue
-            crawled = _parse_rebalance_batch(portfolio_id, portfolio_name, batch)
-            if crawled is None:
-                continue
-            rt = crawled["rebalance_time"]
-            if rt in seen_times:
-                continue
-            seen_times.add(rt)
-            batches_out.append(crawled)
-            page_added += 1
-
         if on_progress is not None:
-            on_progress(page, len(batches_out))
-
-        if len(raw_batches) < page_size:
-            break
-        if page < max_pages:
-            time.sleep(random.uniform(0.55, 1.05))
+            on_progress(1, len(batches_out))
 
     batches_out.sort(key=lambda x: x["rebalance_time"])
     return batches_out
@@ -496,26 +656,35 @@ def fetch_portfolio_rebalance(
     portfolio_id = validate_portfolio_id(portfolio_id)
     api = client or XueQiuApiClient()
 
-    data = api.get_json(
-        REBALANCE_HISTORY_URL,
-        params={"cube_symbol": portfolio_id, "page": 1, "count": 1},
-    )
-    batches = data.get("list") if isinstance(data, dict) else None
-    if not batches:
-        raise RuntimeError(f"组合 {portfolio_id} 未找到调仓记录。")
-
     batch: dict[str, Any] | None = None
-    for item in batches:
-        if not isinstance(item, dict) or item.get("status") != "success":
-            continue
-        has_manual, _ = _classify_rebalance_batch(item)
-        if has_manual:
-            batch = item
-            break
-    if batch is None:
-        raise RuntimeError(f"组合 {portfolio_id} 最新手动调仓不可用（可能仅分红送配或已取消）。")
+    try:
+        data = _get_json_with_retry(
+            api,
+            REBALANCE_HISTORY_URL,
+            params={"cube_symbol": portfolio_id, "page": 1, "count": 20},
+            warm_symbol=portfolio_id,
+        )
+        batches = data.get("list") if isinstance(data, dict) else None
+        if isinstance(batches, list):
+            for item in batches:
+                if not isinstance(item, dict) or item.get("status") != "success":
+                    continue
+                has_manual, _ = _classify_rebalance_batch(item)
+                if has_manual:
+                    batch = item
+                    break
+    except XueQiuApiError as exc:
+        if not _history_api_blocked(exc):
+            raise
 
     portfolio_name = _fetch_portfolio_name(api, portfolio_id)
+    if batch is None:
+        show = _fetch_cube_show_snapshot(api, portfolio_id)
+        rb_id = show.get("last_user_rb_gid")
+        if rb_id is None:
+            raise RuntimeError(f"组合 {portfolio_id} 未找到可入库的手动调仓记录。")
+        batch = _fetch_rebalance_raw_batch(api, portfolio_id, int(rb_id))
+
     crawled = _parse_rebalance_batch(portfolio_id, portfolio_name, batch)
     if crawled is None:
         rebalance_time = _format_rebalance_time(batch.get("updated_at"))

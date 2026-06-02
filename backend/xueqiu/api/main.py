@@ -24,6 +24,7 @@ from xueqiu.api.schemas import (
     PortfoliosOverviewResponse,
     PortfoliosOverviewStatsResponse,
     RecomputeResponse,
+    DiscoveryImportRequest,
     DiscoveryMineRequest,
     DiscoveryMineResponse,
     DiscoveryStatsResponse,
@@ -47,6 +48,7 @@ from xueqiu.api.services import (
     get_portfolios_overview,
     get_portfolios_overview_stats,
     import_trades,
+    iter_discovery_import_stream,
     iter_discovery_mine_stream,
     iter_sync_all_stream,
     iter_sync_xueqiu_stream,
@@ -233,6 +235,50 @@ def discovery_cube_import(account_code: str) -> ImportMinedCubeResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/discovery/import-stream")
+async def discovery_import_stream(
+    request: Request,
+    body: DiscoveryImportRequest = Body(default_factory=DiscoveryImportRequest),
+) -> StreamingResponse:
+    cancel = threading.Event()
+    codes = [str(c).strip().upper() for c in body.account_codes if str(c).strip()]
+
+    async def generate():
+        chunk_queue: queue.Queue[str | None] = queue.Queue()
+
+        def worker() -> None:
+            try:
+                for chunk in iter_discovery_import_stream(codes, cancel_event=cancel):
+                    if cancel.is_set():
+                        break
+                    chunk_queue.put(chunk)
+            finally:
+                chunk_queue.put(None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        while True:
+            if await request.is_disconnected():
+                cancel.set()
+                break
+            try:
+                chunk = chunk_queue.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.15)
+                continue
+            if chunk is None:
+                break
+            yield chunk
+
+        cancel.set()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/discovery/mine-stream")

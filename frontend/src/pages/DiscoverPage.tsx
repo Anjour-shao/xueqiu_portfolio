@@ -23,8 +23,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   fetchDiscoveryCubes,
   fetchDiscoveryStats,
-  importDiscoveryCube,
   patchDiscoveryCube,
+  streamDiscoveryImport,
   streamDiscoveryMine,
 } from '../api/discovery';
 import { LogSection } from '../components/LogSection';
@@ -84,8 +84,11 @@ export function DiscoverPage() {
   const [maxDepth, setMaxDepth] = useState(1);
   const [search, setSearch] = useState('');
   const [mining, setMining] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [logs, setLogs] = useState<SyncLogItem[]>([]);
+  const [importLogs, setImportLogs] = useState<SyncLogItem[]>([]);
   const abortRef = useRef<AbortController | null>(null);
+  const importAbortRef = useRef<AbortController | null>(null);
 
   const statsQuery = useQuery({
     queryKey: ['discovery-stats'],
@@ -110,6 +113,11 @@ export function DiscoverPage() {
     return raw.filter((r: MinedCubeItem) => r.selected == null && !r.imported_at);
   }, [cubesQuery.data, tab]);
 
+  const pendingImportItems = useMemo(
+    () => items.filter((r: MinedCubeItem) => r.selected === 1 && !r.imported_at),
+    [items],
+  );
+
   const patchMut = useMutation({
     mutationFn: ({ code, selected }: { code: string; selected: number }) =>
       patchDiscoveryCube(code, { selected }),
@@ -119,16 +127,48 @@ export function DiscoverPage() {
     },
   });
 
-  const importMut = useMutation({
-    mutationFn: (code: string) => importDiscoveryCube(code),
-    onSuccess: (data) => {
-      showToast(data.message, data.ok ? 'success' : 'error');
-      void queryClient.invalidateQueries({ queryKey: ['discovery-cubes'] });
-      void queryClient.invalidateQueries({ queryKey: ['discovery-stats'] });
-      void queryClient.invalidateQueries({ queryKey: ['accounts'] });
+  const appendImportLog = useCallback((item: SyncLogItem) => {
+    setImportLogs((prev) => [...prev, item]);
+  }, []);
+
+  const runImport = useCallback(
+    async (codes: string[]) => {
+      const normalized = codes.map((c) => c.trim().toUpperCase()).filter(Boolean);
+      if (!normalized.length) return;
+
+      importAbortRef.current?.abort();
+      const controller = new AbortController();
+      importAbortRef.current = controller;
+      setImporting(true);
+      setImportLogs([]);
+      try {
+        const result = await streamDiscoveryImport(normalized, appendImportLog, {
+          signal: controller.signal,
+        });
+        await queryClient.invalidateQueries({ queryKey: ['discovery-cubes'] });
+        await queryClient.invalidateQueries({ queryKey: ['discovery-stats'] });
+        await queryClient.invalidateQueries({ queryKey: ['accounts'] });
+        showToast(
+          result.message || (result.ok ? '入库完成' : '入库未完成'),
+          result.ok ? 'success' : 'error',
+        );
+      } catch (err) {
+        if (controller.signal.aborted) {
+          showToast('入库已停止', 'info');
+          return;
+        }
+        const text = isApiNotFoundError(err)
+          ? STALE_BACKEND_HINT
+          : err instanceof Error
+            ? err.message
+            : '入库失败';
+        showToast(text, 'error');
+      } finally {
+        setImporting(false);
+      }
     },
-    onError: (err: Error) => showToast(err.message, 'error'),
-  });
+    [appendImportLog, queryClient, showToast],
+  );
 
   const appendLog = useCallback((item: SyncLogItem) => {
     setLogs((prev) => [...prev, item]);
@@ -164,7 +204,17 @@ export function DiscoverPage() {
     abortRef.current?.abort();
   }, []);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  const stopImport = useCallback(() => {
+    importAbortRef.current?.abort();
+  }, []);
+
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+      importAbortRef.current?.abort();
+    },
+    [],
+  );
 
   const stats = statsQuery.data;
 
@@ -228,11 +278,11 @@ export function DiscoverPage() {
             size="small"
             color="primary"
             variant="contained"
-            disabled={importMut.isPending}
-            startIcon={importMut.isPending ? <CircularProgress size={12} /> : <CloudDownloadRoundedIcon />}
+            disabled={importing}
+            startIcon={importing ? <CircularProgress size={12} /> : <CloudDownloadRoundedIcon />}
             onClick={(e) => {
               e.stopPropagation();
-              importMut.mutate(row.account_code);
+              void runImport([row.account_code]);
             }}
           >
             入库
@@ -305,6 +355,11 @@ export function DiscoverPage() {
                 <MenuItem value={5}>5 层</MenuItem>
               </Select>
             </FormControl>
+            {importing && (
+              <Button variant="outlined" color="error" size="small" startIcon={<StopRoundedIcon />} onClick={stopImport}>
+                停止入库
+              </Button>
+            )}
             {mining && (
               <Button variant="outlined" color="error" size="small" startIcon={<StopRoundedIcon />} onClick={stopMine}>
                 停止
@@ -338,16 +393,40 @@ export function DiscoverPage() {
             <LogSection title="" logs={logs} running={mining} emptyHint="点击「开始挖掘」从 accounts 种子向外拉自选组合" />
           </SectionCard>
 
+          {(importing || importLogs.length > 0) && (
+            <SectionCard title="入库日志">
+              <LogSection
+                title=""
+                logs={importLogs}
+                running={importing}
+                emptyHint="在「已选中」页点击入库或批量入库"
+              />
+            </SectionCard>
+          )}
+
           <SectionCard
             title="候选组合"
             action={
-              <TextField
-                size="small"
-                placeholder="搜索代码/名称"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                sx={{ width: 200 }}
-              />
+              <Stack direction="row" spacing={1} alignItems="center">
+                {tab === 'selected' && pendingImportItems.length > 0 && (
+                  <Button
+                    size="small"
+                    variant="contained"
+                    disabled={importing || mining}
+                    startIcon={importing ? <CircularProgress size={14} color="inherit" /> : <CloudDownloadRoundedIcon />}
+                    onClick={() => void runImport(pendingImportItems.map((r) => r.account_code))}
+                  >
+                    批量入库 ({pendingImportItems.length})
+                  </Button>
+                )}
+                <TextField
+                  size="small"
+                  placeholder="搜索代码/名称"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  sx={{ width: 200 }}
+                />
+              </Stack>
             }
           >
             <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1} sx={{ mb: 1 }}>
