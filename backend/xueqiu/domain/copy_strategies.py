@@ -28,12 +28,19 @@ from xueqiu.domain.copy_backtest import (
     resolve_trade_price_raw,
     run_backtest,
 )
+from xueqiu.domain.copy_conviction import (
+    HEAVY_HOLDER_PCT,
+    HeavyLegEvent,
+    build_heavy_leg_events,
+    consensus_trust_for_code,
+    conviction_cap_pct,
+    portfolio_trust_at,
+)
 from xueqiu.domain.nav_engine import (
     TradeInput,
     compute_pseudo_nav,
     fmt_trade_date,
     load_adj_map,
-    load_latest_hfq_marks,
     resolve_price_hfq,
 )
 
@@ -58,6 +65,7 @@ class StrategyId(str, Enum):
     ROUTE_E_DECAY_INTENSITY = "route_e_decay_intensity"
     ROUTE_E_DUAL_POOL_BOOST = "route_e_dual_pool_boost"
     ROUTE_F_PARTITION_MIMIC = "route_f_partition_mimic"
+    ROUTE_G_CONVICTION_TRUST = "route_g_conviction_trust"
 
 
 @dataclass
@@ -69,6 +77,12 @@ class StrategySpec:
 
 
 STRATEGY_CATALOG: list[StrategySpec] = [
+    StrategySpec(
+        StrategyId.ROUTE_G_CONVICTION_TRUST,
+        "信念分级·师傅信用",
+        "16师傅合并修正版：≥20%重仓才强跟；20槽位；单票/信念上限25%；腾位不得卖出仍被师傅重仓的核心票",
+        "aggressive",
+    ),
     StrategySpec(
         StrategyId.ROUTE_F_PARTITION_MIMIC,
         "分仓模仿·20%",
@@ -105,7 +119,8 @@ STYLE_POOL_MAP: dict[str, str] = {
 }
 
 STRATEGY_FOCUS: dict[str, str] = {
-    StrategyId.ROUTE_F_PARTITION_MIMIC.value: "主推",
+    StrategyId.ROUTE_G_CONVICTION_TRUST.value: "主推",
+    StrategyId.ROUTE_F_PARTITION_MIMIC.value: "对照",
     StrategyId.ROUTE_B_MERGED_BOOST.value: "对照",
     StrategyId.ROUTE_E_DUAL_POOL_BOOST.value: "防御",
 }
@@ -177,6 +192,14 @@ class RunContext:
     lag_boost_pct: float = 0.22
     lag_resonance_days: int = 5
     recent_buys: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    # 信念分级 + 师傅信用
+    conviction_tier_mode: bool = False
+    conviction_min_master_pct: float = HEAVY_HOLDER_PCT
+    forbid_rotate_heavy: bool = False
+    heavy_leg_events: list[HeavyLegEvent] = field(default_factory=list)
+    trust_min_legs: int = 3
+    mirror: dict[tuple[str, str], float] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 def _group_batches(
@@ -787,24 +810,57 @@ def _sell_weakest_position(
     trade_time: str,
     *,
     trigger: str = "换仓腾位",
+    ctx: RunContext | None = None,
+    new_code: str = "",
 ) -> bool:
-    held = _held_codes(fund)
+    held = [code for code in _held_codes(fund) if code != new_code]
     if not held:
         return False
-    worst_code = ""
-    worst_ret = 1e18
+    ranked: list[tuple[float, str]] = []
+    protected = 0
     for code in held:
+        heavy_holders = (
+            {
+                acct: weight
+                for acct, weight in _holders_for_code(ctx.mirror, code).items()
+                if weight >= ctx.conviction_min_master_pct
+            }
+            if ctx and ctx.forbid_rotate_heavy
+            else {}
+        )
+        if heavy_holders:
+            protected += 1
+            continue
         holding = fund.holdings[code]
         px = raw_prices.get(code, fund.last_raw_marks.get(code, 0.0))
         if px <= 0 or holding.vwap <= 0:
             ret = -999.0
         else:
             ret = px / holding.vwap - 1.0
-        if ret < worst_ret:
-            worst_ret = ret
-            worst_code = code
-    if not worst_code:
+        ranked.append((ret, code))
+    if ctx is not None and protected:
+        ctx.diagnostics["rotate_protected_positions"] = ctx.diagnostics.get("rotate_protected_positions", 0) + protected
+    if not ranked:
+        if ctx is not None:
+            ctx.diagnostics["skipped_by_no_sellable_slot"] = ctx.diagnostics.get("skipped_by_no_sellable_slot", 0) + 1
+        _append_simple_log(
+            trade_logs,
+            trade_time=trade_time,
+            source_portfolio="系统",
+            action="腾位跳过",
+            ts_code=new_code or "",
+            stock_name=fund.stock_names.get(new_code, new_code) if new_code else "无可腾位标的",
+            qty_delta=0.0,
+            nav_after=fund.nav(raw_prices),
+            trigger="换仓跳过",
+            price=raw_prices.get(new_code, 0.0) if new_code else 0.0,
+            our_weight_pct=0.0,
+            master_from=None,
+            master_to=None,
+        )
         return False
+    ranked.sort(key=lambda x: (x[0], x[1]))
+    worst_code = ranked[0][1]
     px = raw_prices.get(worst_code, fund.last_raw_marks.get(worst_code, 0.0))
     if px <= 0:
         return False
@@ -813,6 +869,9 @@ def _sell_weakest_position(
     weight_before = _our_weight_pct(fund, worst_code, raw_prices, nav=nav)
     sold = fund.liquidate_all_slices(worst_code, sell_px, nav)
     if sold > 0:
+        if ctx is not None:
+            ctx.diagnostics["forced_liquidation_count"] = ctx.diagnostics.get("forced_liquidation_count", 0) + 1
+            ctx.diagnostics["forced_liquidation_amount"] = ctx.diagnostics.get("forced_liquidation_amount", 0.0) + sold * sell_px
         nav_after = fund.nav(raw_prices)
         _append_simple_log(
             trade_logs,
@@ -847,7 +906,14 @@ def _ensure_position_slot(
         held = [c for c in _held_codes(fund) if c != new_code]
         if len(held) < ctx.max_positions:
             return
-        if not _sell_weakest_position(fund, raw_prices, trade_logs, trade_time):
+        if not _sell_weakest_position(
+            fund,
+            raw_prices,
+            trade_logs,
+            trade_time,
+            ctx=ctx,
+            new_code=new_code,
+        ):
             return
 
 
@@ -931,6 +997,96 @@ def _apply_consensus_boost_open(
                 trigger="双共识加仓",
                 price=raw_px,
                 our_weight_pct=_our_weight_pct(fund, code, _build_raw_prices(fund, batch_prices), nav=nav_after),
+            )
+
+
+def _conviction_target_for_open(
+    ctx: RunContext,
+    mirror: dict[tuple[str, str], float],
+    acct_code: str,
+    code: str,
+    master_to_weight: float,
+    trade_time: str,
+) -> float:
+    temp_mirror = dict(mirror)
+    temp_mirror[(acct_code, code)] = float(master_to_weight)
+    trust = portfolio_trust_at(
+        ctx.heavy_leg_events,
+        acct_code,
+        trade_time,
+        min_legs=ctx.trust_min_legs,
+        threshold=ctx.conviction_min_master_pct,
+    )
+    return conviction_cap_pct(
+        float(master_to_weight),
+        temp_mirror,
+        code,
+        trust,
+        hard_cap=ctx.belief_cap_pct,
+        heavy_pct=ctx.conviction_min_master_pct,
+    )
+
+
+def _apply_conviction_consensus_align(
+    fund: SliceLedger,
+    mirror: dict[tuple[str, str], float],
+    batch_prices: dict[str, float],
+    ctx: RunContext,
+    trade_logs: list[dict],
+    trade_time: str,
+    star_unlocked: bool,
+) -> None:
+    if not ctx.conviction_tier_mode:
+        return
+    raw_prices = _build_raw_prices(fund, batch_prices)
+    nav = fund.nav(raw_prices)
+    seen: set[str] = set()
+    for (_p, code), weight in mirror.items():
+        if weight < ctx.conviction_min_master_pct or code in seen:
+            continue
+        holders = _holders_for_code(mirror, code)
+        heavy_count = sum(1 for w in holders.values() if w >= ctx.conviction_min_master_pct)
+        if heavy_count < 2:
+            continue
+        seen.add(code)
+        max_master = max(holders.values(), default=0.0)
+        trust = consensus_trust_for_code(
+            ctx.heavy_leg_events,
+            mirror,
+            code,
+            trade_time,
+            min_legs=ctx.trust_min_legs,
+            heavy_pct=ctx.conviction_min_master_pct,
+        )
+        cap = conviction_cap_pct(
+            max_master,
+            mirror,
+            code,
+            trust,
+            hard_cap=ctx.belief_cap_pct,
+            heavy_pct=ctx.conviction_min_master_pct,
+        )
+        if cap <= 0:
+            continue
+        raw_px = batch_prices.get(code) or fund.last_raw_marks.get(code)
+        if not raw_px:
+            continue
+        if fund.physical_qty(code) <= 1e-12:
+            _ensure_position_slot(fund, ctx, raw_prices, trade_logs, trade_time, code)
+            nav = fund.nav(raw_prices)
+        bought = _try_buy_to_target(fund, code, raw_px, cap, nav, holders, star_unlocked)
+        if bought > 0:
+            _append_simple_log(
+                trade_logs,
+                trade_time=trade_time,
+                source_portfolio="共识",
+                source_name="信念共识",
+                action="信念共识加仓",
+                ts_code=code,
+                stock_name=fund.stock_names.get(code, code),
+                qty_delta=bought,
+                nav_after=fund.nav(raw_prices),
+                trigger="信念共识",
             )
 
 
@@ -1056,10 +1212,7 @@ def _finalize(
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     holding_codes = {code for code, h in fund.holdings.items() if h.qty > 1e-12}
-    latest_hfq = load_latest_hfq_marks(holding_codes)
-    hfq_mark_prices = {code: price for code, (_, price) in latest_hfq.items()}
-    for code, mark in fund.last_hfq_marks.items():
-        hfq_mark_prices.setdefault(code, mark)
+    hfq_mark_prices = dict(fund.last_hfq_marks)
     raw_mark_prices = {code: fund.last_raw_marks.get(code, 0.0) for code in holding_codes}
     final_nav = fund.nav(raw_mark_prices)
     final_nav_hfq = fund.nav_hfq(hfq_mark_prices)
@@ -1110,6 +1263,44 @@ def _finalize(
     realized_trades = [leg for st in fund.stats.values() for leg in st.sell_legs]
     wins = sum(1 for leg in realized_trades if leg["leg_return_pct"] >= 0)
     overview_win_rate = round(wins / len(realized_trades) * 100, 2) if realized_trades else 0.0
+    friction_legs = [
+        leg
+        for leg in realized_trades
+        if -2.10 <= float(leg["leg_return_pct"]) <= -1.80
+    ]
+    friction_loss = sum(
+        cfg.initial_capital
+        * float(leg["weight_sold"])
+        / 100.0
+        * abs(float(leg["leg_return_pct"]))
+        / 100.0
+        for leg in friction_legs
+    )
+    traded_accounts = {
+        str(log.get("source_portfolio") or "")
+        for log in trade_logs
+        if str(log.get("source_portfolio") or "") not in ("", "系统", "共识", "共振")
+        and abs(float(log.get("qty_delta") or 0.0)) > 1e-12
+    }
+    diagnostics = {
+        "configured_accounts_count": len(account_names),
+        "loaded_accounts_count": len(account_names),
+        "active_accounts_count": len({acct for acct, _, _trade in all_trades}),
+        "heavy_signal_accounts_count": len(
+            {acct for acct, _, trade in all_trades if float(trade.to_weight) >= cfg.conviction_min_master_pct}
+        ),
+        "traded_accounts_count": len(traded_accounts),
+        "forced_liquidation_count": int(cfg.diagnostics.get("forced_liquidation_count", 0)),
+        "forced_liquidation_amount": round(float(cfg.diagnostics.get("forced_liquidation_amount", 0.0)), 2),
+        "forced_exit_while_master_heavy": int(cfg.diagnostics.get("forced_exit_while_master_heavy", 0)),
+        "skipped_by_no_sellable_slot": int(cfg.diagnostics.get("skipped_by_no_sellable_slot", 0)),
+        "rotate_protected_positions": int(cfg.diagnostics.get("rotate_protected_positions", 0)),
+        "friction_leg_count": len(friction_legs),
+        "friction_loss_estimate": round(friction_loss, 2),
+        "friction_nav_impact_pct": round(friction_loss / cfg.initial_capital * 100.0, 2)
+        if cfg.initial_capital > 0
+        else 0.0,
+    }
 
     blocked_688 = cfg.metrics.get("blocked_688", 0)
     cap_triggers = sum(1 for log in trade_logs if log.get("trigger") == "封顶减仓")
@@ -1147,6 +1338,7 @@ def _finalize(
         "grouped_stats": grouped_stats,
         "source_stats": source_stats,
         "overview_win_rate": overview_win_rate,
+        "diagnostics": diagnostics,
         "blocked_688": blocked_688,
         "cap_triggers": cap_triggers,
         "skipped_lot": skipped_lot,
@@ -1181,6 +1373,12 @@ def _run_owners_batch(
     raw_prices = _build_raw_prices(fund, batch_prices)
     nav_before = fund.nav(raw_prices)
     star_unlocked = nav_before - ctx.initial_capital >= STAR_UNLOCK_PROFIT - 1e-6
+    ctx.mirror = dict(mirror)
+    for acct_code, _, trade in batch:
+        if trade.to_weight <= 1e-9:
+            ctx.mirror.pop((acct_code, trade.ts_code), None)
+        else:
+            ctx.mirror[(acct_code, trade.ts_code)] = float(trade.to_weight)
 
     for acct_code, acct_name, trade in batch:
         if leader_mode and acct_code != leader and acct_code != BOOST_PORTFOLIO:
@@ -1225,6 +1423,8 @@ def _run_owners_batch(
                     _result_to_log(trade_time, acct_code, acct_name, trade, result, raw_px, hfq_px, nav_after)
                 )
         elif trade.to_weight > trade.from_weight + 1e-9:
+            if ctx.conviction_tier_mode and float(trade.to_weight) < ctx.conviction_min_master_pct:
+                continue
             if _is_star_market(trade.ts_code) and not star_unlocked:
                 ctx.metrics["blocked_688"] = ctx.metrics.get("blocked_688", 0) + 1
                 continue
@@ -1269,7 +1469,18 @@ def _run_owners_batch(
                         ctx.max_stock_pct,
                         target * _decay_intensity_multiplier(ctx, trade.ts_code),
                     )
-                if ctx.partition_mimic_mode:
+                if ctx.conviction_tier_mode:
+                    target = _conviction_target_for_open(
+                        ctx,
+                        mirror,
+                        acct_code,
+                        trade.ts_code,
+                        float(trade.to_weight),
+                        trade_time,
+                    )
+                    if target <= 0:
+                        continue
+                elif ctx.partition_mimic_mode:
                     target = min(
                         ctx.max_stock_pct,
                         float(trade.to_weight) / 100.0 * ctx.portfolio_budget_pct,
@@ -1312,6 +1523,7 @@ def _run_owners_batch(
                     )
 
     _update_mirror(mirror, batch)
+    ctx.mirror = dict(mirror)
 
     batch_buy_codes = {
         t.ts_code for _, _, t in batch if t.to_weight > t.from_weight + 1e-9
@@ -1638,11 +1850,20 @@ def run_strategy(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict[str, Any]:
+    import xueqiu.domain.copy_backtest as cb
+
+    cb._RUN_CFG = None
     if strategy_id in (StrategyId.LEGACY_K5, StrategyId.LEGACY_K10):
         k = 5 if strategy_id == StrategyId.LEGACY_K5 else 10
         spec = _strategy_spec(strategy_id)
         return _enrich_legacy_result(
-            run_backtest(BacktestConfig(initial_capital=initial_capital, max_positions=k))
+            run_backtest(
+                BacktestConfig(
+                    initial_capital=initial_capital,
+                    max_positions=k,
+                    forbid_rotate_heavy=False,
+                )
+            )
             | {
                 "strategy_id": strategy_id.value,
                 "label": spec.label,
@@ -1712,6 +1933,24 @@ def run_strategy(
         ctx.open_on_signal = True
         ctx.partition_mimic_mode = True
         ctx.portfolio_budget_pct = PARTITION_BUDGET_PCT
+    elif strategy_id == StrategyId.ROUTE_G_CONVICTION_TRUST:
+        ctx.min_consensus_count = 1
+        ctx.open_on_signal = True
+        ctx.conviction_tier_mode = True
+        # 16 师傅合并跟单：降低单票拥挤，放宽槽位，并禁止为新信号卖出仍被师傅重仓的核心票。
+        ctx.max_stock_pct = 0.25
+        ctx.belief_cap_pct = 0.25
+        ctx.max_positions = 20
+        ctx.forbid_rotate_heavy = True
+        ctx.heavy_leg_events = build_heavy_leg_events(all_trades, adj_map)
+
+        cb._RUN_CFG = BacktestConfig(
+            initial_capital=initial_capital,
+            max_stock_pct=0.25,
+            max_positions=20,
+            min_new_position_pct=2.0,
+            forbid_rotate_heavy=True,
+        )
     elif strategy_id == StrategyId.ROUTE_C_FUNNEL:
         ctx.open_on_signal = True
         ctx.max_positions = 5
@@ -1894,6 +2133,7 @@ def run_strategy(
     result = _finalize(
         fund, ctx, account_names, all_trades, equity_curve, trade_logs, strategy_id, extra
     )
+    cb._RUN_CFG = None
     result["label"] = spec.label
     result["description"] = spec.description
     result["style"] = spec.style
@@ -2005,6 +2245,7 @@ def strategy_to_backtest_response(result: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("min_new_position_pct", 1.0)
     out.setdefault("max_positions", 0)
     out.setdefault("overview_win_rate", 0.0)
+    out.setdefault("diagnostics", {})
     out.setdefault("source_stats", {})
     out.setdefault("positions", [])
     out.setdefault("grouped_stats", [])

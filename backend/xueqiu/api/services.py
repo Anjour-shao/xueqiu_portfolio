@@ -932,12 +932,19 @@ def list_discovery_cubes(
     *,
     auto_pass: bool | None = None,
     selected: int | None = None,
+    pending_only: bool = False,
     depth: int | None = None,
     q: str | None = None,
 ) -> list[dict[str, Any]]:
     from xueqiu.domain.discovery_store import list_mined_cubes
 
-    return list_mined_cubes(auto_pass=auto_pass, selected=selected, depth=depth, q=q)
+    return list_mined_cubes(
+        auto_pass=auto_pass,
+        selected=selected,
+        pending_only=pending_only,
+        depth=depth,
+        q=q,
+    )
 
 
 def patch_discovery_cube(
@@ -949,6 +956,16 @@ def patch_discovery_cube(
     from xueqiu.domain.discovery_store import update_mined_cube_selection
 
     return update_mined_cube_selection(account_code, selected=selected, note=note)
+
+
+def get_discovery_cube_preview(account_code: str) -> dict[str, Any]:
+    from xueqiu.domain.discovery_preview import build_discovery_cube_preview
+    from xueqiu.integrations.xueqiu.client import XueQiuApiError
+
+    try:
+        return build_discovery_cube_preview(account_code)
+    except XueQiuApiError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def import_discovery_cube(account_code: str, *, sink: Any | None = None) -> dict[str, Any]:
@@ -1090,15 +1107,44 @@ def iter_discovery_import_stream(
         yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
 
 
-def run_discovery_mine_api(*, max_depth: int = 1, sink: Any | None = None, cancel_event: Any | None = None) -> dict[str, Any]:
+def run_discovery_mine_api(
+    *,
+    max_depth: int = 1,
+    modes: list[str] | None = None,
+    sink: Any | None = None,
+    cancel_event: Any | None = None,
+) -> dict[str, Any]:
     from xueqiu.domain.discovery_mine import run_discovery_mine
     from xueqiu.sync.sync_log import LogSink
 
     log_sink = sink if isinstance(sink, LogSink) else LogSink()
-    return run_discovery_mine(max_depth=max_depth, sink=log_sink, cancel_event=cancel_event)
+    return run_discovery_mine(
+        max_depth=max_depth,
+        modes=modes,
+        sink=log_sink,
+        cancel_event=cancel_event,
+    )
 
 
-def iter_discovery_mine_stream(*, max_depth: int = 1, cancel_event: Any | None = None):
+def get_discovery_symbol_pool_api() -> dict[str, Any]:
+    from xueqiu.domain.discovery_symbol_pool import get_symbol_pool_meta, list_symbol_pool
+
+    return {"meta": get_symbol_pool_meta(), "items": list_symbol_pool()}
+
+
+def replace_discovery_symbol_pool_api(items: list[dict[str, Any]]) -> dict[str, Any]:
+    from xueqiu.domain.discovery_symbol_pool import get_symbol_pool_meta, list_symbol_pool, replace_symbol_pool
+
+    replace_symbol_pool(items)
+    return {"meta": get_symbol_pool_meta(), "items": list_symbol_pool()}
+
+
+def iter_discovery_mine_stream(
+    *,
+    max_depth: int = 1,
+    modes: list[str] | None = None,
+    cancel_event: Any | None = None,
+):
     import json
     import queue
     import threading
@@ -1115,7 +1161,12 @@ def iter_discovery_mine_stream(*, max_depth: int = 1, cancel_event: Any | None =
 
         sink = LogSink(emit=emit)
         try:
-            result = run_discovery_mine_api(max_depth=max_depth, sink=sink, cancel_event=cancel)
+            result = run_discovery_mine_api(
+                max_depth=max_depth,
+                modes=modes,
+                sink=sink,
+                cancel_event=cancel,
+            )
             if cancel.is_set():
                 event_queue.put({"type": "done", "ok": False, "message": "用户已停止挖掘"})
             else:
@@ -1254,3 +1305,33 @@ def compare_backtest_strategies(
         end_date=end_date,
         entry_sweep_dates=entry_sweep_dates,
     )
+
+
+def get_personal_account() -> dict[str, Any]:
+    from xueqiu.domain.personal_account import build_personal_account_view
+
+    return build_personal_account_view()
+
+
+def update_personal_cash(cash: float) -> dict[str, Any]:
+    from xueqiu.domain.personal_account import update_personal_cash as _update
+
+    return _update(cash)
+
+
+def update_personal_strategy(strategy_id: str) -> dict[str, Any]:
+    from xueqiu.domain.personal_account import update_personal_strategy as _update
+
+    return _update(strategy_id)
+
+
+def execute_personal_trade(**kwargs: Any) -> dict[str, Any]:
+    from xueqiu.domain.personal_account import execute_personal_trade as _trade
+
+    return _trade(**kwargs)
+
+
+def get_copy_rebalance_plan(strategy_id: str | None = None) -> dict[str, Any]:
+    from xueqiu.domain.personal_account import compute_copy_rebalance_plan
+
+    return compute_copy_rebalance_plan(strategy_id=strategy_id)

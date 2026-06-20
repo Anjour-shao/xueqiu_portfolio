@@ -28,6 +28,9 @@ from xueqiu.api.schemas import (
     DiscoveryMineRequest,
     DiscoveryMineResponse,
     DiscoveryStatsResponse,
+    DiscoverySymbolPoolResponse,
+    DiscoveryCubePreviewResponse,
+    ReplaceDiscoverySymbolPoolRequest,
     ImportMinedCubeResponse,
     MinedCubeListResponse,
     UpdateMinedCubeRequest,
@@ -36,14 +39,22 @@ from xueqiu.api.schemas import (
     SyncQuotesResponse,
     SyncXueqiuAllResponse,
     SyncXueqiuResponse,
+    PersonalAccountResponse,
+    PersonalCashUpdateRequest,
+    PersonalStrategyUpdateRequest,
+    PersonalTradeRequest,
+    CopyRebalancePlanResponse,
 )
 from xueqiu.api.services import (
     get_dashboard,
     delete_account,
     get_discovery_stats,
+    get_discovery_cube_preview,
+    get_discovery_symbol_pool_api,
     import_discovery_cube,
     list_discovery_cubes,
     patch_discovery_cube,
+    replace_discovery_symbol_pool_api,
     get_data_freshness,
     get_portfolios_overview,
     get_portfolios_overview_stats,
@@ -62,6 +73,11 @@ from xueqiu.api.services import (
     sync_from_xueqiu,
     sync_latest_hfq_prices,
     sync_quotes_data,
+    get_personal_account,
+    update_personal_cash,
+    update_personal_strategy,
+    execute_personal_trade,
+    get_copy_rebalance_plan,
 )
 from xueqiu.config import DATABASE_URL, HOST, PORT
 from xueqiu.domain.nav_engine import ENGINE_VERSION
@@ -208,10 +224,17 @@ def discovery_stats() -> DiscoveryStatsResponse:
 def discovery_cubes(
     auto_pass: bool | None = None,
     selected: int | None = None,
+    pending_only: bool = False,
     depth: int | None = None,
     q: str | None = None,
 ) -> MinedCubeListResponse:
-    items = list_discovery_cubes(auto_pass=auto_pass, selected=selected, depth=depth, q=q)
+    items = list_discovery_cubes(
+        auto_pass=auto_pass,
+        selected=selected,
+        pending_only=pending_only,
+        depth=depth,
+        q=q,
+    )
     return MinedCubeListResponse(items=items)
 
 
@@ -225,6 +248,16 @@ def discovery_cube_patch(account_code: str, body: UpdateMinedCubeRequest) -> dic
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/discovery/cubes/{account_code}/preview", response_model=DiscoveryCubePreviewResponse)
+def discovery_cube_preview(account_code: str) -> DiscoveryCubePreviewResponse:
+    try:
+        return DiscoveryCubePreviewResponse(**get_discovery_cube_preview(account_code))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/api/discovery/cubes/{account_code}/import", response_model=ImportMinedCubeResponse)
@@ -281,6 +314,21 @@ async def discovery_import_stream(
     )
 
 
+@app.get("/api/discovery/symbol-pool", response_model=DiscoverySymbolPoolResponse)
+def discovery_symbol_pool_get() -> DiscoverySymbolPoolResponse:
+    payload = get_discovery_symbol_pool_api()
+    return DiscoverySymbolPoolResponse(**payload)
+
+
+@app.put("/api/discovery/symbol-pool", response_model=DiscoverySymbolPoolResponse)
+def discovery_symbol_pool_put(body: ReplaceDiscoverySymbolPoolRequest) -> DiscoverySymbolPoolResponse:
+    try:
+        payload = replace_discovery_symbol_pool_api([item.model_dump() for item in body.items])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return DiscoverySymbolPoolResponse(**payload)
+
+
 @app.post("/api/discovery/mine-stream")
 async def discovery_mine_stream(
     request: Request,
@@ -288,13 +336,18 @@ async def discovery_mine_stream(
 ) -> StreamingResponse:
     cancel = threading.Event()
     max_depth = max(1, min(int(body.max_depth), 5))
+    modes = [str(m).strip().lower() for m in body.modes if str(m).strip()]
 
     async def generate():
         chunk_queue: queue.Queue[str | None] = queue.Queue()
 
         def worker() -> None:
             try:
-                for chunk in iter_discovery_mine_stream(max_depth=max_depth, cancel_event=cancel):
+                for chunk in iter_discovery_mine_stream(
+                    max_depth=max_depth,
+                    modes=modes,
+                    cancel_event=cancel,
+                ):
                     if cancel.is_set():
                         break
                     chunk_queue.put(chunk)
@@ -429,6 +482,40 @@ def backtest_copy(payload: CopyBacktestRequest = Body(default_factory=CopyBackte
         return CopyBacktestResponse(**run_copy_backtest(**body.model_dump()))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/personal-account", response_model=PersonalAccountResponse)
+def personal_account() -> PersonalAccountResponse:
+    return PersonalAccountResponse(**get_personal_account())
+
+
+@app.put("/api/personal-account/cash", response_model=PersonalAccountResponse)
+def personal_account_cash(payload: PersonalCashUpdateRequest) -> PersonalAccountResponse:
+    try:
+        return PersonalAccountResponse(**update_personal_cash(payload.cash))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/personal-account/strategy", response_model=PersonalAccountResponse)
+def personal_account_strategy(payload: PersonalStrategyUpdateRequest) -> PersonalAccountResponse:
+    try:
+        return PersonalAccountResponse(**update_personal_strategy(payload.strategy_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/personal-account/trade", response_model=PersonalAccountResponse)
+def personal_account_trade(payload: PersonalTradeRequest) -> PersonalAccountResponse:
+    try:
+        return PersonalAccountResponse(**execute_personal_trade(**payload.model_dump()))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/personal-account/rebalance-plan", response_model=CopyRebalancePlanResponse)
+def personal_rebalance_plan(strategy_id: str | None = None) -> CopyRebalancePlanResponse:
+    return CopyRebalancePlanResponse(**get_copy_rebalance_plan(strategy_id=strategy_id))
 
 
 if __name__ == "__main__":

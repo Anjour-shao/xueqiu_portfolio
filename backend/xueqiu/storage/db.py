@@ -86,6 +86,8 @@ mined_cubes_table = Table(
     Column("owner_name", String(255), nullable=True),
     Column("source_user_uid", BigInteger, nullable=True, index=True),
     Column("source_account_code", String(64), nullable=True),
+    Column("source_type", String(32), nullable=True),
+    Column("source_symbol", String(16), nullable=True),
     Column("depth", Integer, nullable=False, server_default=text("1")),
     Column("cum_return_pct", Float, nullable=True),
     Column("nav_latest_date", String(8), nullable=True),
@@ -100,6 +102,67 @@ mined_cubes_table = Table(
     Column("imported_at", DateTime, nullable=True),
     Column("first_seen_at", DateTime, nullable=False),
     Column("updated_at", DateTime, nullable=False),
+)
+
+discovery_symbol_pool_table = Table(
+    "discovery_symbol_pool",
+    metadata,
+    Column("symbol", String(16), primary_key=True),
+    Column("stock_name", String(64), nullable=True),
+    Column("note", String(255), nullable=True),
+    Column("enabled", Boolean, nullable=False, server_default=text("1")),
+    Column("sort_order", Integer, nullable=False, server_default=text("0")),
+    Column("is_builtin", Boolean, nullable=False, server_default=text("0")),
+    Column("volume_rank_date", String(8), nullable=True),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+discovery_crawled_users_table = Table(
+    "discovery_crawled_users",
+    metadata,
+    Column("user_uid", BigInteger, nullable=False),
+    Column("crawl_kind", String(32), nullable=False),
+    Column("crawled_at", DateTime, nullable=False),
+    PrimaryKeyConstraint("user_uid", "crawl_kind", name="pk_discovery_crawled_users"),
+)
+
+personal_accounts_table = Table(
+    "personal_accounts",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String(255), nullable=False),
+    Column("cash", Float, nullable=False, server_default=text("0")),
+    Column("strategy_id", String(64), nullable=False, server_default="route_g_conviction_trust"),
+    Column("updated_at", DateTime, nullable=False),
+)
+
+personal_holdings_table = Table(
+    "personal_holdings",
+    metadata,
+    Column("account_id", Integer, ForeignKey("personal_accounts.id"), nullable=False),
+    Column("ts_code", String(32), nullable=False),
+    Column("stock_name", String(255), nullable=False),
+    Column("shares", Integer, nullable=False),
+    Column("cost_price", Float, nullable=False),
+    Column("opened_at", String(10), nullable=True),
+    Column("updated_at", DateTime, nullable=False),
+    PrimaryKeyConstraint("account_id", "ts_code", name="pk_personal_holdings"),
+)
+
+personal_trades_table = Table(
+    "personal_trades",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("account_id", Integer, ForeignKey("personal_accounts.id"), nullable=False, index=True),
+    Column("trade_time", String(32), nullable=False),
+    Column("ts_code", String(32), nullable=False),
+    Column("stock_name", String(255), nullable=False),
+    Column("action", String(16), nullable=False),
+    Column("shares", Integer, nullable=False),
+    Column("price", Float, nullable=False),
+    Column("amount", Float, nullable=False),
+    Column("created_at", DateTime, nullable=False),
 )
 
 engine: Engine = create_engine(DATABASE_URL, future=True)
@@ -209,12 +272,60 @@ def _ensure_mined_cubes_schema(conn: Connection) -> None:
         conn.execute(text("ALTER TABLE mined_cubes ADD COLUMN cube_market VARCHAR(16) NULL"))
     if "rebalance_count_6m" not in columns:
         conn.execute(text("ALTER TABLE mined_cubes ADD COLUMN rebalance_count_6m INT NULL"))
+    if "source_type" not in columns:
+        conn.execute(text("ALTER TABLE mined_cubes ADD COLUMN source_type VARCHAR(32) NULL"))
+    if "source_symbol" not in columns:
+        conn.execute(text("ALTER TABLE mined_cubes ADD COLUMN source_symbol VARCHAR(16) NULL"))
+    indexes = {idx["name"] for idx in inspector.get_indexes("mined_cubes")}
+    if "idx_mined_cubes_list" not in indexes:
+        conn.execute(
+            text(
+                "CREATE INDEX idx_mined_cubes_list ON mined_cubes "
+                "(auto_pass, selected, imported_at, cum_return_pct)"
+            )
+        )
+
+
+def _ensure_discovery_symbol_pool_schema(conn: Connection) -> None:
+    inspector = inspect(conn)
+    if "discovery_symbol_pool" not in inspector.get_table_names():
+        discovery_symbol_pool_table.create(conn)
+        return
+    columns = {col["name"] for col in inspector.get_columns("discovery_symbol_pool")}
+    if "stock_name" not in columns:
+        conn.execute(text("ALTER TABLE discovery_symbol_pool ADD COLUMN stock_name VARCHAR(64) NULL"))
+
+
+def _ensure_discovery_crawled_users_schema(conn: Connection) -> None:
+    inspector = inspect(conn)
+    if "discovery_crawled_users" not in inspector.get_table_names():
+        discovery_crawled_users_table.create(conn)
+        conn.execute(
+            text(
+                """
+                INSERT IGNORE INTO discovery_crawled_users (user_uid, crawl_kind, crawled_at)
+                SELECT DISTINCT source_user_uid, COALESCE(source_type, 'watchlist'), updated_at
+                FROM mined_cubes
+                WHERE source_user_uid IS NOT NULL
+                """
+            )
+        )
 
 
 def _drop_legacy_cube_catalog(conn: Connection) -> None:
     inspector = inspect(conn)
     if "cube_catalog" in inspector.get_table_names():
         conn.execute(text("DROP TABLE cube_catalog"))
+
+
+def _ensure_personal_account_schema(conn: Connection) -> None:
+    inspector = inspect(conn)
+    if "personal_accounts" not in inspector.get_table_names():
+        personal_accounts_table.create(conn)
+    if "personal_holdings" not in inspector.get_table_names():
+        personal_holdings_table.create(conn)
+    if "personal_trades" not in inspector.get_table_names():
+        personal_trades_table.create(conn)
 
 
 def init_db() -> None:
@@ -228,6 +339,9 @@ def init_db() -> None:
         _ensure_cube_nav_schema(conn)
         _drop_legacy_cube_catalog(conn)
         _ensure_mined_cubes_schema(conn)
+        _ensure_discovery_symbol_pool_schema(conn)
+        _ensure_discovery_crawled_users_schema(conn)
+        _ensure_personal_account_schema(conn)
 
 
 @contextmanager

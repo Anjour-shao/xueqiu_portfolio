@@ -34,4 +34,10 @@ DEEPSEEK_BASE_URL = (
     or "https://api.deepseek.com"
 )
 
+OSS_ACCESS_KEY_ID = os.getenv("OSS_ACCESS_KEY_ID", "").strip()
+OSS_ACCESS_KEY_SECRET = os.getenv("OSS_ACCESS_KEY_SECRET", "").strip()
+OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "").strip()
+OSS_BUCKET_NAME = os.getenv("OSS_BUCKET_NAME", "").strip()
+OSS_CUSTOM_DOMAIN = os.getenv("OSS_CUSTOM_DOMAIN", "").strip()
+
 COOKIE_FILE = PROJECT_ROOT / "data" / "xueqiu_cookie.txt"

@@ -200,11 +200,18 @@ export interface PositionItem {
   stock_name: string;
   last_action: string;
   current_weight: number;
+  /** 未复权成交成本，通常含买入滑点，仅作辅助排查 */
   avg_cost?: number | null;
+  /** 未复权当前价格，仅作辅助排查 */
   mark_price?: number | null;
+  /** 后复权成本，与 return_pct 同口径 */
   avg_cost_hfq: number | null;
+  /** 后复权当前价格，与 return_pct 同口径 */
   mark_price_hfq: number | null;
+  /** 默认展示收益：后复权口径，含买入滑点成本 */
   return_pct: number | null;
+  return_pct_hfq?: number | null;
+  return_pct_raw?: number | null;
   trade_count: number;
   last_trade_time: string | null;
   latest_quote_date?: string | null;
@@ -311,6 +318,27 @@ export interface DiscoveryStats {
   imported_count: number;
 }
 
+export interface DiscoverySymbolPoolItem {
+  symbol: string;
+  stock_name: string | null;
+  note: string | null;
+  enabled: boolean;
+  sort_order: number;
+  is_builtin: boolean;
+  volume_rank_date: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface DiscoverySymbolPoolResponse {
+  meta: {
+    total_count: number;
+    enabled_count: number;
+    volume_rank_date: string | null;
+  };
+  items: DiscoverySymbolPoolItem[];
+}
+
 export interface MinedCubeItem {
   account_code: string;
   account_name: string;
@@ -318,6 +346,8 @@ export interface MinedCubeItem {
   owner_name: string | null;
   source_user_uid: number | null;
   source_account_code: string | null;
+  source_type: string | null;
+  source_symbol: string | null;
   depth: number;
   cum_return_pct: number | null;
   nav_latest_date: string | null;
@@ -332,6 +362,48 @@ export interface MinedCubeItem {
   imported_at: string | null;
   first_seen_at: string | null;
   updated_at: string | null;
+}
+
+export interface DiscoveryCubePreviewHolding {
+  stock_name: string;
+  symbol: string;
+  weight: number;
+}
+
+export interface DiscoveryCubePreviewTrade {
+  action: string;
+  stock_name: string;
+  symbol: string;
+  weight_change: string;
+}
+
+export interface DiscoveryCubePreviewRecentRebalance {
+  trade_time: string;
+  actions: string[];
+}
+
+export interface DiscoveryCubePreview {
+  account_code: string;
+  account_name: string;
+  owner_name: string | null;
+  description: string | null;
+  market: string | null;
+  created_at: string | null;
+  follower_count: number;
+  net_value: number | null;
+  total_gain_pct: number | null;
+  monthly_gain_pct: number | null;
+  daily_gain_pct: number | null;
+  annualized_gain_pct: number | null;
+  top_gainer_name: string | null;
+  top_gainer_symbol: string | null;
+  holdings: DiscoveryCubePreviewHolding[];
+  latest_rebalance: {
+    trade_time: string | null;
+    trades: DiscoveryCubePreviewTrade[];
+  };
+  recent_rebalances: DiscoveryCubePreviewRecentRebalance[];
+  xueqiu_url: string;
 }
 
 export interface SyncTradeResultItem {
@@ -414,9 +486,12 @@ export interface CopyBacktestPosition {
   stock_name: string;
   qty: number;
   avg_cost?: number | null;
-  mark_price: number;
+  mark_price?: number | null;
+  avg_cost_hfq?: number | null;
   mark_price_hfq?: number | null;
   return_pct?: number | null;
+  return_pct_hfq?: number | null;
+  return_pct_raw?: number | null;
   value: number;
   weight_pct: number;
 }
@@ -479,4 +554,54 @@ export interface DeleteAccountResponse {
   trades_deleted: number;
   nav_points_deleted: number;
   message: string;
+}
+
+export interface PersonalHoldingItem {
+  ts_code: string;
+  stock_name: string;
+  shares: number;
+  cost_price: number;
+  opened_at?: string | null;
+  holding_days?: number | null;
+  price?: number | null;
+  market_value?: number | null;
+  weight_pct?: number | null;
+  unrealized_pnl_pct?: number | null;
+  unrealized_pnl_amount?: number | null;
+}
+
+export interface PersonalAccountResponse {
+  name: string;
+  cash: number;
+  strategy_id: string;
+  market_value: number;
+  total_assets: number;
+  daily_pnl: number;
+  daily_pnl_pct?: number | null;
+  holding_pnl: number;
+  holding_pnl_pct?: number | null;
+  holdings: PersonalHoldingItem[];
+  updated_at?: string | null;
+}
+
+export interface CopyRebalanceAction {
+  action: string;
+  ts_code: string;
+  stock_name: string;
+  shares_delta: number;
+  current_shares: number;
+  target_shares: number;
+  current_weight_pct: number;
+  target_weight_pct: number;
+  price?: number | null;
+  amount?: number | null;
+}
+
+export interface CopyRebalancePlanResponse {
+  strategy_id: string;
+  strategy_label: string;
+  total_assets: number;
+  sim_capital?: number | null;
+  actions: CopyRebalanceAction[];
+  note: string;
 }

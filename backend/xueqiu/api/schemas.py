@@ -343,9 +343,12 @@ class CopyBacktestPosition(BaseModel):
     stock_name: str
     qty: float
     avg_cost: float | None = None
-    mark_price: float
+    mark_price: float | None = None
+    avg_cost_hfq: float | None = None
     mark_price_hfq: float | None = None
     return_pct: float | None = None
+    return_pct_hfq: float | None = None
+    return_pct_raw: float | None = None
     value: float
     weight_pct: float
 
@@ -463,6 +466,7 @@ class CopyBacktestResponse(BaseModel):
     min_new_position_pct: float
     max_positions: int
     overview_win_rate: float = 0.0
+    diagnostics: dict[str, Any] = {}
     source_stats: dict[str, int]
     positions: list[CopyBacktestPosition]
     equity_curve: list[CopyBacktestEquityPoint]
@@ -486,6 +490,8 @@ class MinedCubeItem(BaseModel):
     owner_name: str | None = None
     source_user_uid: int | None = None
     source_account_code: str | None = None
+    source_type: str | None = None
+    source_symbol: str | None = None
     depth: int = 1
     cum_return_pct: float | None = None
     nav_latest_date: str | None = None
@@ -505,6 +511,34 @@ class MinedCubeListResponse(BaseModel):
 
 class DiscoveryMineRequest(BaseModel):
     max_depth: int = 1
+    modes: list[str] = Field(default_factory=lambda: ["watchlist"])
+
+
+class DiscoverySymbolPoolItem(BaseModel):
+    symbol: str
+    stock_name: str | None = None
+    note: str | None = None
+    enabled: bool = True
+    sort_order: int = 0
+    is_builtin: bool = False
+    volume_rank_date: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class DiscoverySymbolPoolMeta(BaseModel):
+    total_count: int
+    enabled_count: int
+    volume_rank_date: str | None = None
+
+
+class DiscoverySymbolPoolResponse(BaseModel):
+    meta: DiscoverySymbolPoolMeta
+    items: list[DiscoverySymbolPoolItem]
+
+
+class ReplaceDiscoverySymbolPoolRequest(BaseModel):
+    items: list[DiscoverySymbolPoolItem]
 
 
 class DiscoveryImportRequest(BaseModel):
@@ -527,3 +561,113 @@ class ImportMinedCubeResponse(BaseModel):
     message: str
     account_code: str
     sync: dict[str, Any] = Field(default_factory=dict)
+
+
+class DiscoveryCubePreviewHolding(BaseModel):
+    stock_name: str
+    symbol: str
+    weight: float
+
+
+class DiscoveryCubePreviewTrade(BaseModel):
+    action: str
+    stock_name: str
+    symbol: str
+    weight_change: str
+
+
+class DiscoveryCubePreviewRebalance(BaseModel):
+    trade_time: str | None = None
+    trades: list[DiscoveryCubePreviewTrade] = Field(default_factory=list)
+
+
+class DiscoveryCubePreviewRecentRebalance(BaseModel):
+    trade_time: str
+    actions: list[str] = Field(default_factory=list)
+
+
+class DiscoveryCubePreviewResponse(BaseModel):
+    account_code: str
+    account_name: str
+    owner_name: str | None = None
+    description: str | None = None
+    market: str | None = None
+    created_at: str | None = None
+    follower_count: int = 0
+    net_value: float | None = None
+    total_gain_pct: float | None = None
+    monthly_gain_pct: float | None = None
+    daily_gain_pct: float | None = None
+    annualized_gain_pct: float | None = None
+    top_gainer_name: str | None = None
+    top_gainer_symbol: str | None = None
+    holdings: list[DiscoveryCubePreviewHolding] = Field(default_factory=list)
+    latest_rebalance: DiscoveryCubePreviewRebalance = Field(default_factory=DiscoveryCubePreviewRebalance)
+    recent_rebalances: list[DiscoveryCubePreviewRecentRebalance] = Field(default_factory=list)
+    xueqiu_url: str
+
+
+class PersonalHoldingItem(BaseModel):
+    ts_code: str
+    stock_name: str
+    shares: int
+    cost_price: float
+    opened_at: str | None = None
+    holding_days: int | None = None
+    price: float | None = None
+    market_value: float | None = None
+    weight_pct: float | None = None
+    unrealized_pnl_pct: float | None = None
+    unrealized_pnl_amount: float | None = None
+
+
+class PersonalAccountResponse(BaseModel):
+    name: str
+    cash: float
+    strategy_id: str
+    market_value: float
+    total_assets: float
+    daily_pnl: float
+    daily_pnl_pct: float | None = None
+    holding_pnl: float
+    holding_pnl_pct: float | None = None
+    holdings: list[PersonalHoldingItem] = Field(default_factory=list)
+    updated_at: str | None = None
+
+
+class PersonalCashUpdateRequest(BaseModel):
+    cash: float
+
+
+class PersonalStrategyUpdateRequest(BaseModel):
+    strategy_id: str
+
+
+class PersonalTradeRequest(BaseModel):
+    action: str
+    ts_code: str
+    shares: int
+    price: float | None = None
+    stock_name: str | None = None
+
+
+class CopyRebalanceAction(BaseModel):
+    action: str
+    ts_code: str
+    stock_name: str
+    shares_delta: int
+    current_shares: int
+    target_shares: int
+    current_weight_pct: float
+    target_weight_pct: float
+    price: float | None = None
+    amount: float | None = None
+
+
+class CopyRebalancePlanResponse(BaseModel):
+    strategy_id: str
+    strategy_label: str
+    total_assets: float
+    sim_capital: float | None = None
+    actions: list[CopyRebalanceAction] = Field(default_factory=list)
+    note: str = ""

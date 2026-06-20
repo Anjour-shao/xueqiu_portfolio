@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 
 from xueqiu.storage.db import get_conn, mined_cubes_table
 
@@ -29,6 +29,8 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         "owner_name": row.owner_name,
         "source_user_uid": row.source_user_uid,
         "source_account_code": row.source_account_code,
+        "source_type": row.source_type,
+        "source_symbol": row.source_symbol,
         "depth": int(row.depth or 1),
         "cum_return_pct": row.cum_return_pct,
         "nav_latest_date": row.nav_latest_date,
@@ -47,44 +49,38 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
 
 
 def get_discovery_stats() -> dict[str, Any]:
+    pending_expr = case(
+        (
+            mined_cubes_table.c.auto_pass.is_(True)
+            & mined_cubes_table.c.selected.is_(None)
+            & mined_cubes_table.c.imported_at.is_(None),
+            1,
+        ),
+        else_=0,
+    )
+    auto_pass_expr = case((mined_cubes_table.c.auto_pass.is_(True), 1), else_=0)
+    selected_expr = case((mined_cubes_table.c.selected == 1, 1), else_=0)
+    rejected_expr = case((mined_cubes_table.c.selected == -1, 1), else_=0)
+    imported_expr = case((mined_cubes_table.c.imported_at.is_not(None), 1), else_=0)
+
     with get_conn() as conn:
-        total = conn.execute(select(func.count()).select_from(mined_cubes_table)).scalar_one()
-        auto_pass = conn.execute(
-            select(func.count())
-            .select_from(mined_cubes_table)
-            .where(mined_cubes_table.c.auto_pass.is_(True))
-        ).scalar_one()
-        pending = conn.execute(
-            select(func.count())
-            .select_from(mined_cubes_table)
-            .where(
-                mined_cubes_table.c.auto_pass.is_(True),
-                mined_cubes_table.c.selected.is_(None),
-                mined_cubes_table.c.imported_at.is_(None),
-            )
-        ).scalar_one()
-        selected = conn.execute(
-            select(func.count())
-            .select_from(mined_cubes_table)
-            .where(mined_cubes_table.c.selected == 1)
-        ).scalar_one()
-        rejected = conn.execute(
-            select(func.count())
-            .select_from(mined_cubes_table)
-            .where(mined_cubes_table.c.selected == -1)
-        ).scalar_one()
-        imported = conn.execute(
-            select(func.count())
-            .select_from(mined_cubes_table)
-            .where(mined_cubes_table.c.imported_at.is_not(None))
-        ).scalar_one()
+        row = conn.execute(
+            select(
+                func.count().label("total"),
+                func.sum(auto_pass_expr).label("auto_pass"),
+                func.sum(pending_expr).label("pending"),
+                func.sum(selected_expr).label("selected"),
+                func.sum(rejected_expr).label("rejected"),
+                func.sum(imported_expr).label("imported"),
+            ).select_from(mined_cubes_table)
+        ).one()
     return {
-        "total_count": int(total or 0),
-        "auto_pass_count": int(auto_pass or 0),
-        "pending_count": int(pending or 0),
-        "selected_count": int(selected or 0),
-        "rejected_count": int(rejected or 0),
-        "imported_count": int(imported or 0),
+        "total_count": int(row.total or 0),
+        "auto_pass_count": int(row.auto_pass or 0),
+        "pending_count": int(row.pending or 0),
+        "selected_count": int(row.selected or 0),
+        "rejected_count": int(row.rejected or 0),
+        "imported_count": int(row.imported or 0),
     }
 
 
@@ -92,6 +88,7 @@ def list_mined_cubes(
     *,
     auto_pass: bool | None = None,
     selected: int | None = None,
+    pending_only: bool = False,
     depth: int | None = None,
     q: str | None = None,
     limit: int = 500,
@@ -101,7 +98,13 @@ def list_mined_cubes(
         mined_cubes_table.c.cum_return_pct.desc(),
         mined_cubes_table.c.account_code.asc(),
     )
-    if auto_pass is not None:
+    if pending_only:
+        stmt = stmt.where(
+            mined_cubes_table.c.auto_pass.is_(True),
+            mined_cubes_table.c.selected.is_(None),
+            mined_cubes_table.c.imported_at.is_(None),
+        )
+    elif auto_pass is not None:
         stmt = stmt.where(mined_cubes_table.c.auto_pass.is_(auto_pass))
     if selected is not None:
         stmt = stmt.where(mined_cubes_table.c.selected == selected)

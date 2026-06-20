@@ -129,7 +129,8 @@ class XueQiuApiClient:
         if warm_symbol:
             sym = warm_symbol.strip().upper()
             try:
-                self._http_get(f"https://xueqiu.com/S/{sym}", sym_hint=f" {sym}")
+                warm_path = f"P/{sym}" if sym.startswith("ZH") else f"S/{sym}"
+                self._http_get(f"https://xueqiu.com/{warm_path}", sym_hint=f" {sym}")
             except XueQiuApiError:
                 pass
         extra_headers = {"Referer": referer} if referer else None

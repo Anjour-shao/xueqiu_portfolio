@@ -24,33 +24,41 @@ from typing import Any
 # 硬编码配置
 # ---------------------------------------------------------------------------
 WATCH_PORTFOLIOS: list[str] = [
-    "ZH3207026",
     "ZH3337164",
     "ZH3365207",
-    "ZH1797852",
-    "ZH3565914",
-    "ZH3326300",
     "ZH3472193",
     "ZH3558598",
-    "ZH810445",
-    "ZH201132",
-    "ZH3625288",
-    "ZH3459601",
+    "ZH3300885",
+    "ZH1236871",
+    "ZH3393223",
+    "ZH3483962",
+    "ZH3610939",
+    "ZH3104761",
+    "ZH3437281",
+    "ZH3476690",
+    "ZH3530915",
+    "ZH3546223",
+    "ZH3585531",
+    "ZH3484875",
 ]
 
 PORTFOLIO_NAMES: dict[str, str] = {
-    "ZH3207026": "牛永贵",
     "ZH3337164": "三年10倍",
     "ZH3365207": "5年退休计划",
-    "ZH1797852": "狗屎运",
-    "ZH3565914": "安哲布",
-    "ZH3326300": "先锋1号",
     "ZH3472193": "利润断层",
     "ZH3558598": "2026垃圾站",
-    "ZH810445": "行业中优选",
-    "ZH201132": "荣耀的进击",
-    "ZH3625288": "集大成",
-    "ZH3459601": "深度夹头",
+    "ZH3300885": "AI概念",
+    "ZH1236871": "赌出个自由",
+    "ZH3393223": "血战到底",
+    "ZH3483962": "投资界老萨满",
+    "ZH3610939": "友谊的大船",
+    "ZH3104761": "景气组合",
+    "ZH3437281": "实仓跟踪",
+    "ZH3476690": "科技",
+    "ZH3530915": "复利中线",
+    "ZH3546223": "争取五倍",
+    "ZH3585531": "2026年十倍股",
+    "ZH3484875": "钽坦",
 }
 
 # 股票账户（截图 2026-05-28 收盘）；cost_price 与雪球账本「持有盈亏」反推一致
@@ -67,7 +75,9 @@ MY_HOLDINGS: list[dict[str, Any]] = [
     {"code": "600522", "name": "中天科技", "shares": 200, "cost_price": 25.48, "holding_days": 17},
 ]
 
-ALWAYS_SEND_HOLDINGS = True
+# 本地仍更新 MY_HOLDINGS 到 state，但钉钉不再展示个人持仓收益。
+ALWAYS_SEND_HOLDINGS = False
+RECORD_HOLDINGS_LOCALLY = True
 
 # 评论：拉最新 N 条（约 3 页 × 20），不做「近 3 天」过滤
 COMMENT_TARGET_COUNT = 50
@@ -977,6 +987,68 @@ def _build_watch_summary(updates: list[PortfolioUpdate]) -> dict[str, Any] | Non
     }
 
 
+def _load_my_holdings_config() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """优先从数据库读取个人持仓，回退脚本内 MY_HOLDINGS。"""
+    try:
+        from xueqiu.domain.personal_account import (
+            account_meta_for_digest,
+            holdings_for_digest,
+            seed_personal_account_from_config,
+        )
+        from xueqiu.storage.db import init_db
+
+        init_db()
+        seed_personal_account_from_config(
+            MY_HOLDINGS,
+            name=str(MY_ACCOUNT.get("name") or "股票账户"),
+            cash=_float_cfg(MY_ACCOUNT, "cash"),
+            total_assets=_float_cfg(MY_ACCOUNT, "total_assets"),
+        )
+        db_holdings = holdings_for_digest()
+        if db_holdings:
+            meta = account_meta_for_digest()
+            account_cfg = dict(MY_ACCOUNT)
+            account_cfg["name"] = meta.get("name") or account_cfg.get("name")
+            if meta.get("cash") is not None:
+                account_cfg["cash"] = meta["cash"]
+            return db_holdings, account_cfg
+    except Exception as exc:
+        print(f"读取数据库个人持仓失败，回退 MY_HOLDINGS: {exc}")
+    return list(MY_HOLDINGS), dict(MY_ACCOUNT)
+
+
+def _compute_copy_plan_safe(updates: list[PortfolioUpdate] | None = None) -> dict[str, Any] | None:
+    if not updates:
+        return None
+    try:
+        from xueqiu.domain.personal_account import compute_copy_rebalance_plan
+
+        rebalance_times: list[str] = []
+        trigger_codes: list[str] = []
+        for upd in updates:
+            for batch in upd.batches:
+                if batch.rebalance_time:
+                    rebalance_times.append(batch.rebalance_time)
+                for record in batch.records or []:
+                    code = str(record.get("code") or "").strip()
+                    if code:
+                        trigger_codes.append(code)
+
+        plan = compute_copy_rebalance_plan(
+            rebalance_times=rebalance_times,
+            trigger_codes=trigger_codes,
+        )
+        if plan.get("actions"):
+            print(f"抄作业调仓方案: {len(plan['actions'])} 笔（{plan.get('strategy_label')}，仅本次新调仓）")
+            return plan
+        if plan.get("note"):
+            print(f"抄作业调仓: {plan['note']}")
+            return plan
+    except Exception as exc:
+        print(f"抄作业调仓方案计算失败: {exc}")
+    return None
+
+
 def send_dingtalk_digest(
     *,
     run_time: str,
@@ -984,6 +1056,8 @@ def send_dingtalk_digest(
     quotes: list[HoldingQuote] | None = None,
     updates: list[PortfolioUpdate] | None = None,
     force_markdown: bool = False,
+    include_holdings: bool = False,
+    copy_plan: dict[str, Any] | None = None,
 ) -> None:
     """推送简报：默认 HTML 渲染为图片；失败时回退 Markdown。"""
     from digest import render as digest_render
@@ -999,10 +1073,11 @@ def send_dingtalk_digest(
             ok, local_path = digest_render.push_digest_image(
                 run_time=run_time,
                 simulate_note=simulate_note,
-                account=account,
-                quotes=quotes,
+                account=account if include_holdings else None,
+                quotes=quotes if include_holdings else None,
                 updates=updates,
                 watch_summary=watch_summary,
+                copy_plan=copy_plan,
                 title=title,
             )
             if ok and push_mode == "image":
@@ -1011,12 +1086,12 @@ def send_dingtalk_digest(
                 print("      图片已推送，继续发送 Markdown 摘要…")
             elif local_path:
                 print(f"      图床未配置或上传失败，已生成本地预览: {local_path}")
-                print("      建议在 .env 配置 IMG_BB_API_KEY 后重试（见 daily_digest/README.md）")
+                print("      建议在 .env 配置 OSS 或 IMG_BB_API_KEY 后重试（见 daily_digest/README.md）")
         except Exception as exc:
             print(f"      图片简报失败，回退 Markdown: {exc}")
 
     holdings_md = ""
-    if quotes and account:
+    if include_holdings and quotes and account:
         holdings_md = _holdings_markdown(quotes, account)
 
     mode = f" · 模拟 {TEST_SIMULATE_NOW}" if TEST_SIMULATE_NOW else ""
@@ -1156,11 +1231,13 @@ def run_holdings_only(*, force_markdown: bool = False) -> None:
     """仅推送个人持仓行情，不扫组合、不调 DeepSeek。"""
     run_time = _now().strftime("%Y-%m-%d %H:%M")
     print(f"=== 仅持仓简报 ({run_time}) ===")
-    if not MY_HOLDINGS:
-        print("未配置 MY_HOLDINGS。")
+    holdings_cfg, account_cfg = _load_my_holdings_config()
+    MY_ACCOUNT.update(account_cfg)
+    if not holdings_cfg:
+        print("未配置持仓。")
         return
     state = load_state()
-    quotes = fetch_holding_quotes(MY_HOLDINGS, state=state)
+    quotes = fetch_holding_quotes(holdings_cfg, state=state)
     account_summary = build_account_summary(quotes, state)
     update_holdings_state(state, quotes, account_summary)
     save_state(state)
@@ -1170,6 +1247,7 @@ def run_holdings_only(*, force_markdown: bool = False) -> None:
         quotes=quotes,
         updates=[],
         force_markdown=force_markdown,
+        include_holdings=True,
     )
     print("=== 执行完毕 ===")
 
@@ -1182,8 +1260,11 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
     base_url = (DEEPSEEK_BASE_URL or "https://api.deepseek.com").strip()
     print(f"DeepSeek: {base_url}")
 
-    if not WATCH_PORTFOLIOS and not MY_HOLDINGS:
-        print("请在脚本顶部配置 WATCH_PORTFOLIOS 或 MY_HOLDINGS。")
+    holdings_cfg, account_cfg = _load_my_holdings_config()
+    MY_ACCOUNT.update(account_cfg)
+
+    if not WATCH_PORTFOLIOS and not holdings_cfg:
+        print("请在脚本顶部配置 WATCH_PORTFOLIOS 或在前端维护个人持仓。")
         return
 
     state = load_state()
@@ -1213,13 +1294,18 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
 
         state["last_digest_at"] = run_time
 
-        if MY_HOLDINGS and (ALWAYS_SEND_HOLDINGS or updates):
-            print("\n拉取个人持仓行情（现价 + 后复权）…")
-            quotes = fetch_holding_quotes(MY_HOLDINGS, state=state)
+        if holdings_cfg and RECORD_HOLDINGS_LOCALLY:
+            print("\n拉取个人持仓行情并仅写入本地 state（钉钉不展示持仓收益）…")
+            quotes = fetch_holding_quotes(holdings_cfg, state=state)
             account_summary = build_account_summary(quotes, state)
             update_holdings_state(state, quotes, account_summary)
 
-        should_send = bool(updates) or (ALWAYS_SEND_HOLDINGS and bool(MY_HOLDINGS))
+        copy_plan: dict[str, Any] | None = None
+        if updates:
+            print("\n计算抄作业调仓方案（仅本次新调仓）…")
+            copy_plan = _compute_copy_plan_safe(updates)
+
+        should_send = bool(updates)
         if should_send:
             send_dingtalk_digest(
                 run_time=run_time,
@@ -1227,9 +1313,11 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
                 quotes=quotes,
                 updates=updates,
                 force_markdown=force_markdown,
+                include_holdings=False,
+                copy_plan=copy_plan,
             )
         else:
-            print("今晚无调仓待推送且未开启持仓推送，跳过钉钉。")
+            print("关注组合无新调仓，已更新本地持仓记录但不发送钉钉。")
     finally:
         try:
             save_state(state)

@@ -26,6 +26,7 @@ class CubeShowInfo:
     owner_uid: int | None
     owner_name: str | None
     market: str | None
+    created_at_ms: int | None = None
 
 
 def normalize_symbol(raw: Any) -> str | None:
@@ -235,10 +236,18 @@ def fetch_cube_show(
         owner_block = data.get("owner")
         if isinstance(owner_block, dict):
             owner_name = str(owner_block.get("screen_name") or "").strip() or None
+    created_at_ms: int | None = None
+    raw_created = data.get("created_at")
+    if raw_created is not None:
+        try:
+            created_at_ms = int(raw_created)
+        except (TypeError, ValueError):
+            created_at_ms = None
     return CubeShowInfo(
         account_code=code,
         account_name=str(data.get("name") or code).strip(),
         owner_uid=owner_uid,
         owner_name=owner_name,
         market=str(data.get("market") or "").strip() or None,
+        created_at_ms=created_at_ms,
     )

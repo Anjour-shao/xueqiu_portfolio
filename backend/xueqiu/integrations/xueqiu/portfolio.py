@@ -69,21 +69,32 @@ def fetch_cube_nav_daily(
 ) -> tuple[str, list[CubeNavPoint]]:
     cube_symbol = validate_portfolio_id(cube_symbol)
     api = client or XueQiuApiClient()
-    params: dict[str, Any] = {"cube_symbol": cube_symbol}
+    referer = f"https://xueqiu.com/P/{cube_symbol}"
+    extra: dict[str, Any] = {}
     if since_ms is not None:
-        params["since"] = since_ms
+        extra["since"] = since_ms
     if until_ms is not None:
-        params["until"] = until_ms
+        extra["until"] = until_ms
+
+    def _pull(params: dict[str, Any]) -> Any:
+        return api.get_json_with_retry(
+            CUBE_NAV_URL,
+            params={"cube_symbol": cube_symbol, **params},
+            referer=referer,
+            warm_symbol=cube_symbol,
+            max_retries=5,
+            delay=(1.2, 2.2),
+        )
 
     try:
-        data = api.get_json(CUBE_NAV_URL, params=params)
+        data = _pull(extra)
     except XueQiuApiError as exc:
-        # 部分组合带 since 会 400，去掉 since 再试一次（仍可能是限流，由上层退避）
-        if since_ms is not None and "400" in str(exc):
+        # 带 since/until 时雪球常返回 400016，不代表 Cookie 失效；去掉范围再试
+        if extra:
             time.sleep(random.uniform(1.2, 2.2))
-            data = api.get_json(CUBE_NAV_URL, params={"cube_symbol": cube_symbol})
+            data = _pull({})
         else:
-            raise
+            raise exc from None
     portfolio_name = cube_symbol
     if isinstance(data, list) and data and isinstance(data[0], dict):
         portfolio_name = str(data[0].get("name") or cube_symbol)
@@ -133,7 +144,9 @@ def validate_portfolio_id(portfolio_id: str) -> str:
 
 def _line_weights(item: dict[str, Any]) -> tuple[float, float]:
     from_weight = float(
-        item.get("prev_weight")
+        item.get("prev_weight_adjusted")
+        if item.get("prev_weight_adjusted") is not None
+        else item.get("prev_weight")
         if item.get("prev_weight") is not None
         else item.get("prev_target_weight") or 0
     )
@@ -143,6 +156,21 @@ def _line_weights(item: dict[str, Any]) -> tuple[float, float]:
         else item.get("weight") or 0
     )
     return from_weight, to_weight
+
+
+def _batch_category_is_user_rebalance(batch: dict[str, Any]) -> bool:
+    """雪球 history 批次 category：user_rebalancing=手动，sys_rebalancing=分红送配等系统事件。"""
+    category = str(batch.get("category") or "").strip().lower()
+    if category == "user_rebalancing":
+        return True
+    if category in {"sys_rebalancing", "system_rebalancing"}:
+        return False
+    if category:
+        return False
+    for text in _iter_json_strings(batch):
+        if any(marker in text for marker in DIVIDEND_MARKERS):
+            return False
+    return True
 
 
 def _iter_json_strings(obj: Any):
@@ -184,8 +212,17 @@ def _line_is_manual_rebalance(item: dict[str, Any]) -> bool:
 
 def _classify_rebalance_batch(batch: dict[str, Any]) -> tuple[bool, bool]:
     """返回 (含手动调仓, 含港美股/非A股)。"""
-    has_manual = False
     has_non_a = False
+    for item in batch.get("rebalancing_histories") or []:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("stock_symbol") or item.get("code") or "").strip()
+        if symbol and is_hk_us_or_non_a_share(symbol):
+            has_non_a = True
+    if not _batch_category_is_user_rebalance(batch):
+        return False, has_non_a
+
+    has_manual = False
     for item in batch.get("rebalancing_histories") or []:
         if not isinstance(item, dict):
             continue

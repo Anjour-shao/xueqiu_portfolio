@@ -12,9 +12,9 @@ const POSITION_COLS: TableColumn[] = [
   { key: 'stock_name', label: '股票', sortable: true, width: '20%' },
   { key: 'holding_days', label: '持仓时长', sortable: true, width: '14%' },
   { key: 'current_weight', label: '仓位', sortable: true, width: '12%' },
-  { key: 'avg_cost', label: '成本', sortable: true, width: '14%', clip: false },
-  { key: 'mark_price', label: '现价', sortable: true, width: '14%', clip: false },
-  { key: 'return_pct', label: '浮动', sortable: true, width: '14%', clip: false },
+  { key: 'avg_cost', label: '复权成本', sortable: true, width: '14%', clip: false },
+  { key: 'mark_price', label: '复权现价', sortable: true, width: '14%', clip: false },
+  { key: 'return_pct', label: '浮动收益', sortable: true, width: '14%', clip: false },
 ];
 
 const TRADE_COLS: TableColumn[] = [
@@ -110,14 +110,22 @@ function sortGrouped(items: GroupedStatItem[], sort: TableSort) {
 }
 
 function positionsRows(positions: PositionItem[]) {
-  return positions.map((item) => [
-    item.stock_name,
-    fmtHoldingDays(item.holding_days, item.is_holding ?? true),
-    `${item.current_weight.toFixed(1)}%`,
-    (item.avg_cost ?? item.avg_cost_hfq)?.toFixed(2) ?? '-',
-    (item.mark_price ?? item.mark_price_hfq)?.toFixed(2) ?? '-',
-    fmtPct(item.return_pct),
-  ]);
+  return positions.map((item) => {
+    const hfqCost = item.avg_cost_hfq ?? null;
+    const hfqMark = item.mark_price_hfq ?? null;
+    const rawHint =
+      item.return_pct_raw != null && item.return_pct_hfq != null && Math.abs(item.return_pct_raw - item.return_pct_hfq) > 0.05
+        ? `raw ${fmtPct(item.return_pct_raw)}`
+        : '';
+    return [
+      item.stock_name,
+      fmtHoldingDays(item.holding_days, item.is_holding ?? true),
+      `${item.current_weight.toFixed(1)}%`,
+      hfqCost?.toFixed(2) ?? (item.avg_cost?.toFixed(2) ?? '-'),
+      hfqMark?.toFixed(2) ?? (item.mark_price?.toFixed(2) ?? '-'),
+      rawHint ? `${fmtPct(item.return_pct)} (${rawHint})` : fmtPct(item.return_pct),
+    ];
+  });
 }
 
 function stockCumReturn(item: GroupedStatItem) {

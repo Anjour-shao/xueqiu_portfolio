@@ -1,5 +1,12 @@
 import api from './client';
-import type { DiscoveryStats, MinedCubeItem, SyncLogItem } from '../types';
+import type {
+  DiscoveryCubePreview,
+  DiscoveryStats,
+  DiscoverySymbolPoolItem,
+  DiscoverySymbolPoolResponse,
+  MinedCubeItem,
+  SyncLogItem,
+} from '../types';
 
 export type SyncStreamDoneEvent = { type: 'done'; ok: boolean; message?: string };
 
@@ -11,6 +18,7 @@ export async function fetchDiscoveryStats() {
 export async function fetchDiscoveryCubes(params?: {
   auto_pass?: boolean;
   selected?: number;
+  pending_only?: boolean;
   depth?: number;
   q?: string;
 }) {
@@ -23,6 +31,13 @@ export async function patchDiscoveryCube(
   body: { selected?: number; note?: string },
 ) {
   const res = await api.patch<MinedCubeItem>(`/api/discovery/cubes/${encodeURIComponent(accountCode)}`, body);
+  return res.data;
+}
+
+export async function fetchDiscoveryCubePreview(accountCode: string) {
+  const res = await api.get<DiscoveryCubePreview>(
+    `/api/discovery/cubes/${encodeURIComponent(accountCode)}/preview`,
+  );
   return res.data;
 }
 
@@ -77,14 +92,31 @@ export async function streamDiscoveryImport(
   return result;
 }
 
+export async function fetchDiscoverySymbolPool() {
+  const res = await api.get<DiscoverySymbolPoolResponse>('/api/discovery/symbol-pool');
+  return res.data;
+}
+
+export async function saveDiscoverySymbolPool(items: DiscoverySymbolPoolItem[]) {
+  const res = await api.put<DiscoverySymbolPoolResponse>('/api/discovery/symbol-pool', { items });
+  return res.data;
+}
+
 export async function streamDiscoveryMine(
   onLog: (item: SyncLogItem) => void,
-  options?: { max_depth?: number; signal?: AbortSignal },
+  options?: {
+    max_depth?: number;
+    modes?: string[];
+    signal?: AbortSignal;
+  },
 ): Promise<{ ok: boolean; message?: string }> {
   const res = await fetch('/api/discovery/mine-stream', {
     method: 'POST',
     headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ max_depth: options?.max_depth ?? 1 }),
+    body: JSON.stringify({
+      max_depth: options?.max_depth ?? 1,
+      modes: options?.modes ?? ['watchlist'],
+    }),
     signal: options?.signal,
   });
   if (!res.ok) {

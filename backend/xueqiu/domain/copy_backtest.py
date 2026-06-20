@@ -23,7 +23,6 @@ from xueqiu.domain.nav_engine import (
     TradeInput,
     fmt_trade_date,
     load_adj_map,
-    load_latest_hfq_marks,
     resolve_price_hfq,
 )
 
@@ -31,6 +30,9 @@ INITIAL_CAPITAL = 100_000.0
 MAX_STOCK_PCT = 0.20
 MIN_NEW_POSITION_PCT = 1.0
 MAX_POSITIONS = 5
+HEAVY_MASTER_PCT = 20.0
+FRICTION_LEG_LOW = -2.10
+FRICTION_LEG_HIGH = -1.80
 STAR_UNLOCK_PROFIT = 500_000.0
 MAIN_LOT_SIZE = 100
 STAR_LOT_SIZE = 200
@@ -49,6 +51,8 @@ class BacktestConfig:
     min_new_position_pct: float = MIN_NEW_POSITION_PCT
     max_positions: int = MAX_POSITIONS
     target_invested_pct: float = TARGET_INVESTED_PCT
+    heavy_master_pct: float = HEAVY_MASTER_PCT
+    forbid_rotate_heavy: bool = False
 
 
 def _cfg() -> BacktestConfig:
@@ -113,6 +117,19 @@ class Holding:
 @dataclass
 class _StockStats:
     sell_legs: list[dict[str, float]] = field(default_factory=list)
+
+
+@dataclass
+class BacktestDiagnostics:
+    configured_accounts_count: int = 0
+    loaded_accounts_count: int = 0
+    active_accounts_count: int = 0
+    heavy_signal_accounts_count: int = 0
+    traded_accounts_count: int = 0
+    forced_liquidation_count: int = 0
+    forced_liquidation_amount: float = 0.0
+    forced_exit_while_master_heavy: int = 0
+    skipped_by_no_sellable_slot: int = 0
 
 
 @dataclass
@@ -514,6 +531,155 @@ def _build_hfq_prices(fund: SliceLedger, batch_hfq: dict[str, float]) -> dict[st
     return prices
 
 
+def _holding_cost_hfq(fund: SliceLedger, code: str, raw_vwap: float) -> float:
+    if raw_vwap <= 0:
+        return 0.0
+    last_hfq = fund.last_hfq_marks.get(code)
+    last_raw = fund.last_raw_marks.get(code)
+    if last_hfq and last_raw and last_raw > 0:
+        return raw_vwap * (last_hfq / last_raw)
+    return raw_vwap
+
+
+def build_latest_mark_snapshot(
+    fund: SliceLedger,
+    holding_codes: set[str],
+) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
+    """用 quote_points 最新后复权价盯市；未复权价由成本比例或 adj 换算。"""
+    from xueqiu.domain.nav_engine import _raw_mark_from_hfq, load_latest_adj_factors, load_latest_hfq_marks
+
+    latest_hfq = load_latest_hfq_marks(holding_codes)
+    latest_adj = load_latest_adj_factors(holding_codes)
+    raw_mark_prices: dict[str, float] = {}
+    hfq_mark_prices: dict[str, float] = {}
+    quote_dates: dict[str, str] = {}
+
+    for code in holding_codes:
+        holding = fund.holdings.get(code)
+        raw_vwap = holding.vwap if holding else 0.0
+        cost_hfq = _holding_cost_hfq(fund, code, raw_vwap)
+        if code in latest_hfq:
+            quote_date, hfq = latest_hfq[code]
+            hfq_mark_prices[code] = hfq
+            quote_dates[code] = quote_date
+            raw = _raw_mark_from_hfq(
+                hfq,
+                cost_hfq,
+                raw_vwap if raw_vwap > 0 else None,
+                latest_adj.get(code),
+            )
+            raw_mark_prices[code] = raw if raw and raw > 0 else fund.last_raw_marks.get(code, 0.0)
+        else:
+            hfq_mark_prices[code] = fund.last_hfq_marks.get(code, 0.0)
+            raw_mark_prices[code] = fund.last_raw_marks.get(code, 0.0)
+
+    for code, mark in fund.last_hfq_marks.items():
+        hfq_mark_prices.setdefault(code, mark)
+    for code, mark in fund.last_raw_marks.items():
+        raw_mark_prices.setdefault(code, mark)
+
+    return raw_mark_prices, hfq_mark_prices, quote_dates
+
+
+def _position_return_pct(
+    fund: SliceLedger,
+    code: str,
+    raw_price: float,
+    hfq_price: float,
+    raw_vwap: float,
+) -> float | None:
+    """当前持仓浮动收益，优先使用后复权口径。
+
+    注意：raw_vwap 是含买入滑点的未复权成交成本；hfq_price 是当前后复权价。
+    展示收益时必须把 raw_vwap 换算到同一后复权口径，否则前端会出现
+    “成本/现价看似未复权，但收益按复权价算”的错配。
+    """
+    if raw_vwap <= 0:
+        return None
+    cost_hfq = _holding_cost_hfq(fund, code, raw_vwap)
+    if hfq_price > 0 and cost_hfq > 0:
+        return round((hfq_price / cost_hfq - 1.0) * 100, 2)
+    if raw_price > 0:
+        return round((raw_price / raw_vwap - 1.0) * 100, 2)
+    return None
+
+
+def _position_raw_return_pct(raw_price: float, raw_vwap: float) -> float | None:
+    """未复权口径的价格收益，仅用于辅助排查复权/滑点差异。"""
+    if raw_price > 0 and raw_vwap > 0:
+        return round((raw_price / raw_vwap - 1.0) * 100, 2)
+    return None
+
+
+def build_copy_positions(
+    fund: SliceLedger,
+    raw_mark_prices: dict[str, float],
+    hfq_mark_prices: dict[str, float],
+    final_nav: float,
+) -> list[dict]:
+    positions: list[dict] = []
+    for code, holding in fund.holdings.items():
+        if holding.qty <= 1e-12:
+            continue
+        raw_price = raw_mark_prices.get(code, 0.0)
+        hfq_price = hfq_mark_prices.get(code, 0.0)
+        cost_hfq = _holding_cost_hfq(fund, code, holding.vwap)
+        value = holding.qty * raw_price if raw_price > 0 else 0.0
+        return_hfq = _position_return_pct(fund, code, raw_price, hfq_price, holding.vwap)
+        return_raw = _position_raw_return_pct(raw_price, holding.vwap)
+        positions.append(
+            {
+                "ts_code": code,
+                "stock_name": fund.stock_names.get(code, code),
+                "qty": round(holding.qty, 0),
+                # 兼容旧前端：avg_cost/mark_price 仍保留未复权口径。
+                "avg_cost": round(holding.vwap, 4),
+                "mark_price": round(raw_price, 4) if raw_price else None,
+                # 新字段：前端回测持仓应优先展示这组同口径复权价格。
+                "avg_cost_hfq": round(cost_hfq, 4) if cost_hfq else None,
+                "mark_price_hfq": round(hfq_price, 4) if hfq_price else None,
+                "return_pct": return_hfq,
+                "return_pct_hfq": return_hfq,
+                "return_pct_raw": return_raw,
+                "value": round(value, 2),
+                "weight_pct": round(value / final_nav * 100, 2) if final_nav > 0 else 0.0,
+            }
+        )
+    positions.sort(key=lambda x: -x["value"])
+    return positions
+
+
+def maybe_append_latest_equity_point(
+    fund: SliceLedger,
+    equity_curve: list[dict],
+    initial_capital: float,
+    holding_codes: set[str],
+    raw_mark_prices: dict[str, float],
+    hfq_mark_prices: dict[str, float],
+    quote_dates: dict[str, str],
+) -> None:
+    if not equity_curve or not holding_codes or not quote_dates:
+        return
+    last_trade_date = fmt_trade_date(equity_curve[-1]["trade_time"])
+    latest_global_date = max(quote_dates.values())
+    if latest_global_date <= last_trade_date:
+        return
+    final_nav_hfq = fund.nav_hfq(hfq_mark_prices)
+    if final_nav_hfq <= 0:
+        return
+    final_nav = fund.nav(raw_mark_prices)
+    equity_curve.append(
+        {
+            "trade_time": f"{latest_global_date[:4]}-{latest_global_date[4:6]}-{latest_global_date[6:8]} 15:00:00",
+            "total_nav": round(final_nav, 2),
+            "total_nav_hfq": round(final_nav_hfq, 2),
+            "cum_return_pct": round((final_nav_hfq / initial_capital - 1.0) * 100, 2),
+            "profit": round(final_nav - initial_capital, 2),
+            "profit_hfq": round(final_nav_hfq - initial_capital, 2),
+        }
+    )
+
+
 def enforce_stock_cap(fund: SliceLedger, prices: dict[str, float], max_pct: float, trade_time: str = "") -> list[dict]:
     nav_pre = fund.nav(prices)
     if nav_pre <= 0:
@@ -605,6 +771,18 @@ def _held_codes(fund: SliceLedger) -> list[str]:
     return [c for c, h in fund.holdings.items() if h.qty > 1e-12]
 
 
+def _heavy_holders_for_code(
+    mirror: dict[tuple[str, str], float],
+    code: str,
+    heavy_pct: float,
+) -> dict[str, float]:
+    return {
+        acct: weight
+        for (acct, ts_code), weight in mirror.items()
+        if ts_code == code and weight >= heavy_pct
+    }
+
+
 def _rotate_for_pool(
     fund: SliceLedger,
     pool: list[str],
@@ -612,31 +790,71 @@ def _rotate_for_pool(
     prices: dict[str, float],
     trade_time: str,
     star_unlocked: bool,
+    mirror: dict[tuple[str, str], float],
+    diagnostics: BacktestDiagnostics,
 ) -> list[dict]:
-    """方案A：为新进入活跃池的股票腾出名额，卖掉 follow_score 最低的持仓。"""
+    """为新进入活跃池的股票腾位；师傅仍重仓的票不得被强制换仓卖出。"""
     cfg = _cfg()
     logs: list[dict] = []
     pool_set = set(pool)
-    held = _held_codes(fund)
 
     for code in pool:
-        if code in held:
+        if code in _held_codes(fund):
             continue
+        blocked_by_heavy = False
         while len(_held_codes(fund)) >= cfg.max_positions:
             held_now = _held_codes(fund)
             if not held_now:
                 break
-            # 优先踢出不在活跃池的；否则踢 score 最低
             outside = [c for c in held_now if c not in pool_set]
-            victim = min(outside or held_now, key=lambda c: (scores.get(c, 0.0), c))
+            ranked = sorted(outside or held_now, key=lambda c: (scores.get(c, 0.0), c))
+            victim = None
+            heavy_holders: dict[str, float] = {}
+            for candidate in ranked:
+                candidate_heavy = _heavy_holders_for_code(mirror, candidate, cfg.heavy_master_pct)
+                if cfg.forbid_rotate_heavy and candidate_heavy:
+                    blocked_by_heavy = True
+                    continue
+                victim = candidate
+                heavy_holders = candidate_heavy
+                break
+            if victim is None:
+                diagnostics.skipped_by_no_sellable_slot += 1
+                logs.append(
+                    {
+                        "trade_time": trade_time,
+                        "source_portfolio": "系统",
+                        "source_name": "换仓",
+                        "stock_name": fund.stock_names.get(code, code),
+                        "ts_code": code,
+                        "master_from": None,
+                        "master_to": None,
+                        "action": "换仓跳过",
+                        "price": round(prices.get(code, 0.0), 4) if prices.get(code) else None,
+                        "price_hfq": round(fund.last_hfq_marks.get(code, 0.0), 4) or None,
+                        "qty_delta": 0.0,
+                        "our_weight_pct": 0.0,
+                        "nav_after": round(fund.nav(prices), 2),
+                        "note": "无可腾位标的：当前持仓仍被师傅重仓，不为新信号强卖核心仓",
+                        "trigger": "换仓跳过",
+                        "leg_return_pct": None,
+                        "slice_qty_before": None,
+                        "slice_qty_after": None,
+                        "physical_qty": fund.physical_qty(code),
+                    }
+                )
+                break
             raw_px = prices.get(victim) or fund.last_raw_marks.get(victim)
             if not raw_px or raw_px <= 0:
-                held.remove(victim) if victim in held else None
                 break
             nav_pre = fund.nav(prices)
             sold = fund.liquidate_all_slices(victim, _slippage_price(raw_px, False), nav_pre)
             if sold <= 1e-12:
                 break
+            diagnostics.forced_liquidation_count += 1
+            diagnostics.forced_liquidation_amount += sold * _slippage_price(raw_px, False)
+            if heavy_holders:
+                diagnostics.forced_exit_while_master_heavy += 1
             logs.append(
                 {
                     "trade_time": trade_time,
@@ -652,7 +870,7 @@ def _rotate_for_pool(
                     "qty_delta": round(-sold, 4),
                     "our_weight_pct": 0.0,
                     "nav_after": round(fund.nav(prices), 2),
-                    "note": f"为活跃池腾出名额 score={scores.get(victim, 0):.1f}",
+                    "note": f"为活跃池腾出名额 score={scores.get(victim, 0):.1f}；重仓师傅={len(heavy_holders)}",
                     "trigger": "换仓",
                     "leg_return_pct": None,
                     "slice_qty_before": None,
@@ -661,6 +879,8 @@ def _rotate_for_pool(
                 }
             )
         if code in _held_codes(fund):
+            continue
+        if blocked_by_heavy and len(_held_codes(fund)) >= cfg.max_positions:
             continue
         if _is_star_market(code) and not star_unlocked:
             continue
@@ -857,6 +1077,14 @@ def run_backtest(config: BacktestConfig | None = None) -> dict:
     rebalance_triggers = 0
     skipped_lot = 0
     skipped_small = 0
+    diagnostics = BacktestDiagnostics(
+        configured_accounts_count=len(account_names),
+        loaded_accounts_count=len(account_names),
+        active_accounts_count=len({acct for acct, _, _ in all_trades}),
+        heavy_signal_accounts_count=len(
+            {acct for acct, _, trade in all_trades if trade.to_weight >= cfg.heavy_master_pct}
+        ),
+    )
 
     mirror: dict[tuple[str, str], float] = {}
 
@@ -997,7 +1225,16 @@ def run_backtest(config: BacktestConfig | None = None) -> dict:
         scores = _compute_follow_scores(mirror, batch_increase_codes)
         pool = _active_pool(scores, cfg.max_positions)
         raw_prices = _build_raw_prices(fund, batch_prices)
-        rotate_logs = _rotate_for_pool(fund, pool, scores, raw_prices, trade_time, star_unlocked)
+        rotate_logs = _rotate_for_pool(
+            fund,
+            pool,
+            scores,
+            raw_prices,
+            trade_time,
+            star_unlocked,
+            mirror,
+            diagnostics,
+        )
         if rotate_logs:
             rotate_triggers += len(rotate_logs)
             trade_logs.extend(rotate_logs)
@@ -1032,14 +1269,16 @@ def run_backtest(config: BacktestConfig | None = None) -> dict:
         )
 
     holding_codes = {code for code, h in fund.holdings.items() if h.qty > 1e-12}
-    latest_hfq = load_latest_hfq_marks(holding_codes)
-    hfq_mark_prices = {code: price for code, (_, price) in latest_hfq.items()}
-    for code, mark in fund.last_hfq_marks.items():
-        hfq_mark_prices.setdefault(code, mark)
-
-    raw_mark_prices: dict[str, float] = {}
-    for code in holding_codes:
-        raw_mark_prices[code] = fund.last_raw_marks.get(code, 0.0)
+    raw_mark_prices, hfq_mark_prices, quote_dates = build_latest_mark_snapshot(fund, holding_codes)
+    maybe_append_latest_equity_point(
+        fund,
+        equity_curve,
+        cfg.initial_capital,
+        holding_codes,
+        raw_mark_prices,
+        hfq_mark_prices,
+        quote_dates,
+    )
 
     final_nav = fund.nav(raw_mark_prices)
     final_nav_hfq = fund.nav_hfq(hfq_mark_prices)
@@ -1047,30 +1286,7 @@ def run_backtest(config: BacktestConfig | None = None) -> dict:
     profit_hfq = final_nav_hfq - cfg.initial_capital
     cash_pct = round(fund.cash / final_nav * 100, 2) if final_nav > 0 else 0.0
 
-    positions: list[dict] = []
-    for code, holding in fund.holdings.items():
-        if holding.qty <= 1e-12:
-            continue
-        raw_price = raw_mark_prices.get(code, 0.0)
-        hfq_price = hfq_mark_prices.get(code, 0.0)
-        value = holding.qty * raw_price
-        return_pct = None
-        if raw_price > 0 and holding.vwap > 0:
-            return_pct = round((raw_price / holding.vwap - 1.0) * 100, 2)
-        positions.append(
-            {
-                "ts_code": code,
-                "stock_name": fund.stock_names.get(code, code),
-                "qty": round(holding.qty, 0),
-                "avg_cost": round(holding.vwap, 4),
-                "mark_price": round(raw_price, 4),
-                "mark_price_hfq": round(hfq_price, 4) if hfq_price else None,
-                "return_pct": return_pct,
-                "value": round(value, 2),
-                "weight_pct": round(value / final_nav * 100, 2) if final_nav > 0 else 0.0,
-            }
-        )
-    positions.sort(key=lambda x: -x["value"])
+    positions = build_copy_positions(fund, raw_mark_prices, hfq_mark_prices, final_nav)
 
     all_stock_codes = set(fund.trade_counts.keys()) | holding_codes
     grouped_stats = [
@@ -1087,6 +1303,39 @@ def run_backtest(config: BacktestConfig | None = None) -> dict:
     realized_trades = [leg for st in fund.stats.values() for leg in st.sell_legs]
     wins = sum(1 for leg in realized_trades if leg["leg_return_pct"] >= 0)
     overview_win_rate = round(wins / len(realized_trades) * 100, 2) if realized_trades else 0.0
+
+    friction_legs = [
+        leg
+        for leg in realized_trades
+        if FRICTION_LEG_LOW <= float(leg["leg_return_pct"]) <= FRICTION_LEG_HIGH
+    ]
+    friction_loss = sum(
+        cfg.initial_capital * float(leg["weight_sold"]) / 100.0 * abs(float(leg["leg_return_pct"])) / 100.0
+        for leg in friction_legs
+    )
+    traded_accounts = {
+        str(log["source_portfolio"])
+        for log in trade_logs
+        if str(log.get("source_portfolio") or "") not in ("", "系统")
+        and abs(float(log.get("qty_delta") or 0.0)) > 1e-12
+    }
+    diagnostics.traded_accounts_count = len(traded_accounts)
+    diagnostics_payload = {
+        "configured_accounts_count": diagnostics.configured_accounts_count,
+        "loaded_accounts_count": diagnostics.loaded_accounts_count,
+        "active_accounts_count": diagnostics.active_accounts_count,
+        "heavy_signal_accounts_count": diagnostics.heavy_signal_accounts_count,
+        "traded_accounts_count": diagnostics.traded_accounts_count,
+        "forced_liquidation_count": diagnostics.forced_liquidation_count,
+        "forced_liquidation_amount": round(diagnostics.forced_liquidation_amount, 2),
+        "forced_exit_while_master_heavy": diagnostics.forced_exit_while_master_heavy,
+        "skipped_by_no_sellable_slot": diagnostics.skipped_by_no_sellable_slot,
+        "friction_leg_count": len(friction_legs),
+        "friction_loss_estimate": round(friction_loss, 2),
+        "friction_nav_impact_pct": round(friction_loss / cfg.initial_capital * 100.0, 2)
+        if cfg.initial_capital > 0
+        else 0.0,
+    }
 
     return {
         "initial_capital": cfg.initial_capital,
@@ -1113,6 +1362,7 @@ def run_backtest(config: BacktestConfig | None = None) -> dict:
         "min_new_position_pct": cfg.min_new_position_pct,
         "max_positions": cfg.max_positions,
         "overview_win_rate": overview_win_rate,
+        "diagnostics": diagnostics_payload,
         "trade_logs": trade_logs,
         "source_stats": source_stats,
         "positions": positions,

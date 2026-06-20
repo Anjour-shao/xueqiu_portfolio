@@ -21,6 +21,21 @@ IMG_BB_API_KEY = os.getenv("IMG_BB_API_KEY", "").strip()
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "").strip()
 DINGTALK_KEYWORD = os.getenv("DINGTALK_KEYWORD", "").strip()
 
+try:
+    from xueqiu.config import (
+        OSS_ACCESS_KEY_ID,
+        OSS_ACCESS_KEY_SECRET,
+        OSS_BUCKET_NAME,
+        OSS_CUSTOM_DOMAIN,
+        OSS_ENDPOINT,
+    )
+except Exception:
+    OSS_ACCESS_KEY_ID = os.getenv("OSS_ACCESS_KEY_ID", "").strip()
+    OSS_ACCESS_KEY_SECRET = os.getenv("OSS_ACCESS_KEY_SECRET", "").strip()
+    OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "").strip()
+    OSS_BUCKET_NAME = os.getenv("OSS_BUCKET_NAME", "").strip()
+    OSS_CUSTOM_DOMAIN = os.getenv("OSS_CUSTOM_DOMAIN", "").strip()
+
 
 def _pnl_class(value: float | None) -> str:
     if value is None or value == 0:
@@ -80,6 +95,7 @@ def build_report_context(
     quotes: list[Any] | None = None,
     updates: list[Any] | None = None,
     watch_summary: dict[str, Any] | None = None,
+    copy_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ctx: dict[str, Any] = {
         "title": "每日组合简报",
@@ -89,6 +105,7 @@ def build_report_context(
         "holdings": [],
         "updates": [],
         "watch_summary": watch_summary,
+        "copy_plan": None,
     }
 
     if account is not None:
@@ -198,6 +215,47 @@ def build_report_context(
             }
         )
     ctx["updates"] = upd_list
+
+    if copy_plan and copy_plan.get("actions"):
+        plan_actions: list[dict[str, Any]] = []
+        for item in copy_plan.get("actions") or []:
+            action = str(item.get("action", ""))
+            if action == "买入":
+                badge, short = "buy", "买"
+            elif action == "卖出":
+                badge, short = "sell", "卖"
+            else:
+                badge, short = "other", action[:1] or "·"
+            plan_actions.append(
+                {
+                    "action_short": short,
+                    "badge_cls": badge,
+                    "name": item.get("stock_name", ""),
+                    "code": item.get("ts_code", ""),
+                    "shares_delta": item.get("shares_delta", 0),
+                    "current_shares": item.get("current_shares", 0),
+                    "target_shares": item.get("target_shares", 0),
+                    "weight_change": (
+                        f"{item.get('current_weight_pct', 0):.1f}% → {item.get('target_weight_pct', 0):.1f}%"
+                    ),
+                    "price": item.get("price"),
+                    "price_fmt": f"{item.get('price'):.2f}" if item.get("price") else "-",
+                    "amount_fmt": _fmt_money(item.get("amount")),
+                }
+            )
+        ctx["copy_plan"] = {
+            "strategy_label": copy_plan.get("strategy_label", ""),
+            "strategy_id": copy_plan.get("strategy_id", ""),
+            "actions": plan_actions,
+            "note": copy_plan.get("note", ""),
+        }
+    elif copy_plan and copy_plan.get("note"):
+        ctx["copy_plan"] = {
+            "strategy_label": copy_plan.get("strategy_label", ""),
+            "strategy_id": copy_plan.get("strategy_id", ""),
+            "actions": [],
+            "note": copy_plan.get("note", ""),
+        }
     return ctx
 
 
@@ -242,6 +300,8 @@ def upload_image(path: Path) -> str:
     errors: list[str] = []
     if mode == "auto":
         backends: list[str] = []
+        if all([OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET, OSS_ENDPOINT, OSS_BUCKET_NAME]):
+            backends.append("oss")
         if IMG_BB_API_KEY:
             backends.append("imgbb")
         backends.extend(["0x0", "transfer", "catbox"])
@@ -250,6 +310,8 @@ def upload_image(path: Path) -> str:
 
     for backend in backends:
         try:
+            if backend == "oss":
+                return _upload_oss(path)
             if backend == "imgbb":
                 return _upload_imgbb(path)
             if backend == "0x0":
@@ -263,6 +325,24 @@ def upload_image(path: Path) -> str:
             errors.append(f"{backend}: {exc}")
 
     raise RuntimeError("图床上传均失败 — " + " | ".join(errors))
+
+
+def _upload_oss(path: Path) -> str:
+    try:
+        import oss2
+    except ImportError as exc:
+        raise RuntimeError("未安装 oss2，请执行: pip install oss2") from exc
+
+    if not all([OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET, OSS_ENDPOINT, OSS_BUCKET_NAME]):
+        raise RuntimeError("OSS 环境变量未配置完整")
+
+    auth = oss2.Auth(OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET)
+    bucket = oss2.Bucket(auth, f"https://{OSS_ENDPOINT}", OSS_BUCKET_NAME)
+    key = f"digest/{path.name}"
+    bucket.put_object_from_file(key, str(path))
+    if OSS_CUSTOM_DOMAIN:
+        return f"{OSS_CUSTOM_DOMAIN.rstrip('/')}/{key}"
+    return f"https://{OSS_BUCKET_NAME}.{OSS_ENDPOINT}/{key}"
 
 
 def _upload_imgbb(path: Path) -> str:
@@ -364,6 +444,7 @@ def push_digest_image(
     quotes: list[Any] | None = None,
     updates: list[Any] | None = None,
     watch_summary: dict[str, Any] | None = None,
+    copy_plan: dict[str, Any] | None = None,
     title: str = "每日组合",
 ) -> tuple[bool, Path | None]:
     context = build_report_context(
@@ -373,6 +454,7 @@ def push_digest_image(
         quotes=quotes,
         updates=updates,
         watch_summary=watch_summary,
+        copy_plan=copy_plan,
     )
     html = render_report_html(context)
     safe_time = re.sub(r"[^\d]", "", run_time)[:12] or "digest"
@@ -397,6 +479,8 @@ def push_digest_image(
         caption += f"\n\n组合调仓: {names}"
     elif watch_summary and watch_summary.get("count"):
         caption += f"\n\n组合调仓: 今晚无新调仓（已巡检 {watch_summary['count']} 个）"
+    if copy_plan and copy_plan.get("actions"):
+        caption += f"\n\n抄作业调仓: {len(copy_plan['actions'])} 笔建议"
 
     ok = send_dingtalk_image(title, image_url, caption=caption)
     return ok, out_path

@@ -47,6 +47,7 @@ const STYLE_COLOR: Record<string, 'default' | 'primary' | 'secondary' | 'warning
 };
 
 const DEFAULT_SELECTED = [
+  'route_g_conviction_trust',
   'route_f_partition_mimic',
   'route_b_merged_boost',
   'route_e_dual_pool_boost',
@@ -113,23 +114,29 @@ function StrategyCard({
 
 function CompareTable({
   rows,
+  entryDate,
   onViewDetail,
   detailLoadingId,
 }: {
   rows: StrategyCompareSummary[];
+  entryDate: string | null;
   onViewDetail: (id: string) => void;
   detailLoadingId: string | null;
 }) {
   if (!rows.length) return null;
   const bestId = rows[0]?.strategy_id;
+  const returnLabel = entryDate ? `自 ${entryDate} 收益` : '全历史收益';
+  const subtitle = entryDate
+    ? `自 ${entryDate} 空仓跟单 · 按收益排序`
+    : '全历史空仓跟单 · 按收益排序';
   return (
-    <SectionCard title="对比结果" subtitle="全历史空仓跟单 · 按收益排序 · 明细页可选入场点" noPadding>
+    <SectionCard title="对比结果" subtitle={subtitle} noPadding>
       <Box sx={{ overflowX: 'auto' }}>
         <Table size="small">
           <TableHead>
             <TableRow>
               <TableCell>策略</TableCell>
-              <TableCell align="right">全历史收益</TableCell>
+              <TableCell align="right">{returnLabel}</TableCell>
               <TableCell align="right">持仓数</TableCell>
               <TableCell align="right">最大回撤</TableCell>
               <TableCell align="right">现金%</TableCell>
@@ -155,7 +162,7 @@ function CompareTable({
                   </Stack>
                 </TableCell>
                 <TableCell align="right" sx={{ fontWeight: 600, color: DASHBOARD_THEME.primary }}>
-                  {fmtPct(row.return_pct)}
+                  {fmtPct(entryDate ? row.return_since_entry : row.return_pct)}
                 </TableCell>
                 <TableCell align="right">{row.position_count ?? '—'}</TableCell>
                 <TableCell align="right">
@@ -184,12 +191,14 @@ function CompareTable({
 function RightPanel({
   phase,
   selectedCount,
+  entryDate,
   compareRows,
   onViewDetail,
   detailLoadingId,
 }: {
   phase: 'idle' | 'running' | 'done' | 'error';
   selectedCount: number;
+  entryDate: string | null;
   compareRows: StrategyCompareSummary[];
   onViewDetail: (id: string) => void;
   detailLoadingId: string | null;
@@ -208,7 +217,14 @@ function RightPanel({
   }
 
   if (phase === 'done' && compareRows.length > 0) {
-    return <CompareTable rows={compareRows} onViewDetail={onViewDetail} detailLoadingId={detailLoadingId} />;
+    return (
+      <CompareTable
+        rows={compareRows}
+        entryDate={entryDate}
+        onViewDetail={onViewDetail}
+        detailLoadingId={detailLoadingId}
+      />
+    );
   }
 
   return (
@@ -216,7 +232,7 @@ function RightPanel({
       <Stack spacing={1.5} py={2}>
         <Typography sx={{ fontSize: 14, fontWeight: 600 }}>对比结果将显示在这里</Typography>
         <Typography sx={{ fontSize: 13, color: DASHBOARD_THEME.textSecondary, lineHeight: 1.6 }}>
-          左侧选择策略并点击「运行对比」。进入明细后，可在净值图上选择入场日并重新回测。
+          左侧选择策略、可选入场日期，点击「运行对比」。明细页仍可在净值图上调整入场点。
         </Typography>
         {phase === 'error' && (
           <Typography sx={{ fontSize: 12, color: DASHBOARD_THEME.up }}>上次对比失败，请重试。</Typography>
@@ -234,6 +250,7 @@ export function BacktestPage() {
   const [phase, setPhase] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   const [compareRows, setCompareRows] = useState<StrategyCompareSummary[]>([]);
   const [detailLoadingId, setDetailLoadingId] = useState<string | null>(null);
+  const [entryDate, setEntryDate] = useState<string | null>(null);
   const [config, setConfig] = useState<CopyBacktestRequest>({
     initial_capital: 1_000_000,
     max_stock_pct: 20,
@@ -262,6 +279,7 @@ export function BacktestPage() {
     try {
       const data = await compareBacktestStrategies(selected, {
         initialCapital: config.initial_capital,
+        startDate: entryDate,
       });
       setCompareRows(data.results);
       setPhase('done');
@@ -277,19 +295,19 @@ export function BacktestPage() {
       showToast(text, 'error');
       setPhase('error');
     }
-  }, [selected, config.initial_capital, showToast]);
+  }, [selected, config.initial_capital, entryDate, showToast]);
 
   const viewDetail = useCallback(
     async (strategyId: string) => {
       setDetailLoadingId(strategyId);
       try {
         const spec = strategies.find((s) => s.id === strategyId);
-        const data = await runCopyBacktest({ ...config, strategy_id: strategyId });
+        const data = await runCopyBacktest({ ...config, strategy_id: strategyId, start_date: entryDate });
         const meta = {
           strategy_id: strategyId,
           strategy_label: spec?.label,
           initial_capital: config.initial_capital,
-          entry_date: null,
+          entry_date: entryDate,
         };
         setBacktestDashboard(copyBacktestToDashboard(data, meta), meta);
         navigate(`/portfolio/${BACKTEST_ACCOUNT_ID}`);
@@ -304,7 +322,7 @@ export function BacktestPage() {
         setDetailLoadingId(null);
       }
     },
-    [config, navigate, showToast, strategies],
+    [config, entryDate, navigate, showToast, strategies],
   );
 
   return (
@@ -314,7 +332,7 @@ export function BacktestPage() {
         icon={<AssessmentRoundedIcon />}
         meta={
           <Typography component="span" sx={{ fontSize: 12, color: DASHBOARD_THEME.textSecondary }}>
-            合并跟单变体对比 · 明细页可选入场点 · 滑点1%
+            合并跟单变体对比 · 可选入场点 · 滑点1%
           </Typography>
         }
         actions={
@@ -348,17 +366,50 @@ export function BacktestPage() {
         >
           <Stack spacing={2}>
             <SectionCard title="参数">
-              <TextField
-                size="small"
-                label="初始资金"
-                type="number"
-                fullWidth
-                value={config.initial_capital}
-                onChange={(e) => setConfig((c) => ({ ...c, initial_capital: Number(e.target.value) || 0 }))}
-              />
-              <Typography sx={{ fontSize: 11, color: DASHBOARD_THEME.textMuted, mt: 1.5, lineHeight: 1.5 }}>
-                默认全历史回测。进入明细后，在净值图上点选日期可从该日重新模拟。
-              </Typography>
+              <Stack spacing={1.5}>
+                <TextField
+                  size="small"
+                  label="初始资金"
+                  type="number"
+                  fullWidth
+                  value={config.initial_capital}
+                  onChange={(e) => setConfig((c) => ({ ...c, initial_capital: Number(e.target.value) || 0 }))}
+                />
+                <Stack direction="row" spacing={1} alignItems="flex-start">
+                  <TextField
+                    size="small"
+                    label="入场日期"
+                    type="date"
+                    fullWidth
+                    value={entryDate ?? ''}
+                    onChange={(e) => setEntryDate(e.target.value || null)}
+                    InputLabelProps={{ shrink: true }}
+                    helperText={
+                      entryDate
+                        ? `从 ${entryDate} 起空仓跟单，跳过此前调仓`
+                        : '留空表示全历史回测'
+                    }
+                  />
+                  {entryDate && (
+                    <Button size="small" variant="outlined" sx={{ mt: 0.5, flexShrink: 0 }} onClick={() => setEntryDate(null)}>
+                      全历史
+                    </Button>
+                  )}
+                </Stack>
+                <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                  {(['2020-01-01', '2023-01-01', '2024-01-01'] as const).map((d) => (
+                    <Chip
+                      key={d}
+                      size="small"
+                      label={d.slice(0, 4)}
+                      variant={entryDate === d ? 'filled' : 'outlined'}
+                      color={entryDate === d ? 'primary' : 'default'}
+                      onClick={() => setEntryDate(d)}
+                      sx={{ cursor: 'pointer' }}
+                    />
+                  ))}
+                </Stack>
+              </Stack>
             </SectionCard>
 
             <SectionCard title="选择策略" subtitle={`已选 ${selected.length} 个`}>
@@ -379,6 +430,7 @@ export function BacktestPage() {
           <RightPanel
             phase={phase}
             selectedCount={selected.length}
+            entryDate={entryDate}
             compareRows={compareRows}
             onViewDetail={viewDetail}
             detailLoadingId={detailLoadingId}

@@ -231,6 +231,18 @@
     }
     .watch-tag.new { background: #fde8e8; color: #e54545; }
     .watch-tag.ok { background: #e8f5ee; color: #14a85c; }
+    .plan-hint {
+      font-size: 11px;
+      color: #5c6570;
+      margin-bottom: 10px;
+      line-height: 1.5;
+    }
+    .plan-strategy {
+      font-size: 12px;
+      font-weight: 600;
+      color: #3b82f6;
+      margin-bottom: 8px;
+    }
   </style>
 </head>
 <body>
@@ -374,6 +386,28 @@
         </div>
       </div>
       {% endif %}
+    </div>
+    {% endif %}
+
+    {% if copy_plan %}
+    <div class="card">
+      <div class="card-title">抄作业调仓方案</div>
+      <div class="plan-strategy">{{ copy_plan.strategy_label }} · {{ copy_plan.strategy_id }}</div>
+      <div class="plan-hint">{{ copy_plan.note or "以下仅针对本次新推送的组合调仓，按策略跟单规则给出参考，非追历史仓位。" }}</div>
+      {% for item in copy_plan.actions %}
+      <div class="rb-trade">
+        <div class="rb-row">
+          <span class="rb-badge {{ item.badge_cls }}">{{ item.action_short }}</span>
+          <div class="rb-detail">
+            <div class="rb-stock">{{ item.name }} <span style="font-weight:400;color:#8a9199">{{ item.code }}</span></div>
+            <div class="rb-extra">
+              {{ item.shares_delta }} 股 · {{ item.current_shares }} → {{ item.target_shares }} 股 · {{ item.weight_change }}
+            </div>
+            <div class="rb-extra">{{ item.price_fmt }} · 约 {{ item.amount_fmt }}</div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
     </div>
     {% endif %}
 

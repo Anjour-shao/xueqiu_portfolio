@@ -17,6 +17,7 @@ dependencies = [
     "tushare>=1.4.18",
     "requests>=2.31",
     "openai>=1.0",
+    "oss2>=2.18",
 ]
 
 [project.optional-dependencies]

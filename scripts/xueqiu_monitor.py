@@ -33,6 +33,27 @@ from xueqiu.integrations.xueqiu.posts import fetch_stock_posts
 from xueqiu.storage.db import init_db
 
 
+# 仅这些关注组合发生“今日调仓”时推送钉钉；本地同步/记录逻辑不依赖该列表。
+WATCHED_PORTFOLIOS: dict[str, str] = {
+    "ZH3337164": "三年10倍",
+    "ZH3365207": "5年退休计划",
+    "ZH3472193": "利润断层",
+    "ZH3558598": "2026垃圾站",
+    "ZH3300885": "AI概念",
+    "ZH1236871": "赌出个自由",
+    "ZH3393223": "血战到底",
+    "ZH3483962": "投资界老萨满",
+    "ZH3610939": "友谊的大船",
+    "ZH3104761": "景气组合",
+    "ZH3437281": "实仓跟踪",
+    "ZH3476690": "科技",
+    "ZH3530915": "复利中线",
+    "ZH3546223": "争取五倍",
+    "ZH3585531": "2026年十倍股",
+    "ZH3484875": "钽坦",
+}
+
+
 def _deepseek_client() -> OpenAI | None:
     if not DEEPSEEK_API_KEY:
         return None
@@ -122,24 +143,26 @@ def send_dingtalk_msg(portfolio_id, portfolio_name, rebalance_time, rebalances, 
         print(f"[{portfolio_id}] 未配置 DINGTALK_WEBHOOK，跳过推送。")
         return
 
-    md_text = "### 雪球调仓与 AI 研判监控\n"
-    md_text += f"**组合名称：** {portfolio_name} ({portfolio_id})\n"
-    md_text += f"**调仓时间：** {rebalance_time}\n\n---\n"
+    display_name = WATCHED_PORTFOLIOS.get(portfolio_id, portfolio_name)
+    md_text = "### 雪球关注组合调仓提醒\n"
+    md_text += f"**组合名称：** {display_name} ({portfolio_id})\n"
+    md_text += f"**调仓时间：** {rebalance_time}\n\n"
+    md_text += "> 本通知仅展示关注组合调仓与买入标的评论区研判，不展示本地跟单持仓收益。\n\n---\n"
 
     for item in rebalances:
         action_icon = "卖出" if item["action"] == "卖出" else "买入/加仓"
         md_text += f"#### {action_icon} | {item['action']} | {item['name']} ({item['code']})\n"
-        md_text += f"- **成交价:** {item['price']} | **仓位:** {item['weight_change']}\n\n"
+        md_text += f"- **成交价:** {item['price']} | **组合仓位变化:** {item['weight_change']}\n\n"
 
         if item["action"] == "买入" and item["code"] in ai_summaries:
-            md_text += "> **DeepSeek 深度舆情研判：**\n"
+            md_text += "> **雪球评论区 / DeepSeek 研判：**\n"
             summary_lines = ai_summaries[item["code"]].split("\n")
             formatted_summary = "\n> ".join(summary_lines)
             md_text += f"> {formatted_summary}\n\n"
 
     data = {
         "msgtype": "markdown",
-        "markdown": {"title": f"调仓提醒: {portfolio_name}", "text": md_text},
+        "markdown": {"title": f"调仓提醒: {display_name}", "text": md_text},
     }
     try:
         headers = {"Content-Type": "application/json"}
@@ -150,7 +173,8 @@ def send_dingtalk_msg(portfolio_id, portfolio_name, rebalance_time, rebalances, 
 
 
 def check_single_portfolio(client: XueQiuApiClient, portfolio_id: str) -> None:
-    print(f"\n[{portfolio_id}] 正在巡检…")
+    display_name = WATCHED_PORTFOLIOS.get(portfolio_id, portfolio_id)
+    print(f"\n[{portfolio_id}] {display_name} 正在巡检…")
 
     try:
         crawled = fetch_portfolio_rebalance(portfolio_id, client=client)
@@ -191,13 +215,15 @@ def check_single_portfolio(client: XueQiuApiClient, portfolio_id: str) -> None:
 
 def main() -> None:
     init_db()
-    target_portfolios = list_xueqiu_portfolio_codes()
-    if not target_portfolios:
-        print("数据库中没有 ZH 开头的雪球组合，请先导入或同步账户。")
-        return
+    db_portfolios = set(list_xueqiu_portfolio_codes())
+    target_portfolios = list(WATCHED_PORTFOLIOS.keys())
+    missing = [pid for pid in target_portfolios if pid not in db_portfolios]
 
     print(f"=== 雪球 AI 监控启动 ({datetime.now().strftime('%Y-%m-%d %H:%M')}) ===")
-    print(f"监控组合: {', '.join(target_portfolios)}")
+    print("钉钉关注组合:")
+    for pid in target_portfolios:
+        suffix = "（数据库暂未导入，本次仍尝试在线巡检）" if pid in missing else ""
+        print(f"  - {pid} {WATCHED_PORTFOLIOS[pid]}{suffix}")
 
     client = XueQiuApiClient()
     total = len(target_portfolios)
@@ -206,7 +232,7 @@ def main() -> None:
         if index < total:
             time.sleep(random.uniform(1.0, 2.0))
 
-    print("=== 所有任务执行完毕 ===")
+    print("=== 所有关注组合巡检完毕 ===")
 
 
 if __name__ == "__main__":

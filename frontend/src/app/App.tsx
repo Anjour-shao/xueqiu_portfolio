@@ -5,6 +5,7 @@ import { ComparePage } from '../pages/ComparePage';
 import { HoldingsPage } from '../pages/HoldingsPage';
 import { OverviewPage } from '../pages/OverviewPage';
 import { DiscoverPage } from '../pages/DiscoverPage';
+import { MyPortfolioPage } from '../pages/MyPortfolioPage';
 import { SyncDataPage } from '../pages/SyncDataPage';
 
 export default function App() {
@@ -14,6 +15,7 @@ export default function App() {
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/overview" replace />} />
           <Route path="overview" element={<OverviewPage />} />
+          <Route path="my-portfolio" element={<MyPortfolioPage />} />
           <Route path="portfolio/:accountCode" element={<HoldingsPage />} />
           <Route path="discover" element={<DiscoverPage />} />
           <Route path="sync" element={<SyncDataPage />} />
