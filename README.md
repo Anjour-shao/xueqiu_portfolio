@@ -51,13 +51,29 @@ ACCOUNT_DASHBOARD_PORT=8011
 
 ### 3. 雪球 Cookie
 
+**本地开发 / 本机跑脚本**（读文件，优先级低于环境变量）：
+
 ```bash
 cd backend
-pip install -e ".[login]"              # 仅本地登录需要 DrissionPage
-python ../scripts/xueqiu_login.py      # 扫码 → data/xueqiu_cookie.txt
+pip install -e ".[login]"              # 仅登录时需要
+python ../scripts/xueqiu_login.py      # 扫码 → 写入 data/xueqiu_cookie.txt
 ```
 
-Cookie 过期后重新登录并更新 `data/xueqiu_cookie.txt`（已在 `.gitignore`，勿提交）。
+更新 Cookie 后：
+- **后端 API**：重启 `python main.py`（新请求会读新 Cookie）
+- **本地 Digest**：直接再跑 `python daily_digest/daily_portfolio_digest.py` 即可
+- **无需改代码**，也**不要**把 Cookie 提交到 Git
+
+也可在 `backend/.env` 设置 `XUEQIU_COOKIE=完整Cookie字符串`（会覆盖文件）。
+
+**GitHub Actions 每日简报**（读 Secret，不读仓库里的文件）：
+
+1. 本地 `xueqiu_login.py` 登录成功后，打开 `data/xueqiu_cookie.txt`，**全选复制**整行内容
+2. GitHub 仓库 → **Settings** → **Secrets and variables** → **Actions**
+3. 编辑或新建 **`XUEQIU_COOKIE`**，粘贴并保存
+4. 手动 **Run workflow** 验证，或等下次定时触发
+
+Cookie 过期时，钉钉简报会推送 **「Cookie 过期 · 请更新」** 提醒（含更新步骤）。
 
 ### 4. 启动
 

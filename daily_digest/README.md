@@ -17,12 +17,13 @@ daily_digest/
 
 ## 本地运行
 
-1. 在 `daily_portfolio_digest.py` 顶部填写 `WATCH_PORTFOLIOS`、`MY_HOLDINGS`。
+1. 在 `daily_portfolio_digest.py` 顶部填写 `WATCH_PORTFOLIOS`；个人持仓优先从数据库读（见前端「我的持仓」），否则回退脚本内 `MY_HOLDINGS`。
 2. 在 `backend/.env` 填写（与主项目共用 `xueqiu.config`）：
    - `DINGTALK_WEBHOOK`
    - `DEEPSEEK_API_KEY`
    - `DEEPSEEK_BASE_URL`（可选）
-   - 雪球 Cookie：`data/xueqiu_cookie.txt` 或环境变量 `XUEQIU_COOKIE`
+   - OSS 图床变量（推荐，见下表）
+   - 雪球 Cookie：**本地**用 `data/xueqiu_cookie.txt`；**GHA** 用 Secret `XUEQIU_COOKIE`（见下文）
 3. 安装依赖并执行：
 
 ```bash
@@ -62,6 +63,17 @@ Workflow：[`.github/workflows/daily_digest.yml`](../.github/workflows/daily_dig
 | `OSS_ENDPOINT` / `OSS_BUCKET_NAME` / `OSS_CUSTOM_DOMAIN` | OSS 桶与访问域名 |
 | `IMG_BB_API_KEY` | 图床备选（OSS 不可用时回退） |
 | `ACCOUNT_DASHBOARD_DATABASE_URL` | 可选；配置后从库读「我的持仓」，否则用脚本内 `MY_HOLDINGS` |
+
+### Cookie 更新（本地 vs Actions）
+
+| 运行环境 | Cookie 存放位置 | 更新步骤 |
+|----------|-----------------|----------|
+| **本地** | `data/xueqiu_cookie.txt` 或 `backend/.env` 的 `XUEQIU_COOKIE` | `python scripts/xueqiu_login.py` → 覆盖文件 → 重启后端（如在跑） |
+| **GitHub Actions** | 仓库 Secret **`XUEQIU_COOKIE`** | 复制 `xueqiu_cookie.txt` 全文 → Settings → Secrets → 编辑保存 → 手动 Run workflow |
+
+加载优先级：`XUEQIU_COOKIE` 环境变量 **高于** `data/xueqiu_cookie.txt`。
+
+Cookie 失效时简报仍会推送，标题为 **「Cookie 过期 · 请更新」**，正文含上述步骤。
 
 ### 立即验证
 
@@ -105,7 +117,8 @@ $env:GITHUB_TOKEN = "ghp_..."
 |----------|------|
 | Playwright / chromium 报错 | workflow 已 `playwright install --with-deps chromium` |
 | 图片失败 | 检查 OSS 配置或 `IMG_BB_API_KEY` 回退，或 `--push-markdown` |
-| `返回 HTML` / `400016` | Cookie 过期，本地 `scripts/xueqiu_login.py` 后更新 Secret |
+| `返回 HTML` / `400016` | Cookie 过期：本地更新 `data/xueqiu_cookie.txt`；GHA 更新 Secret `XUEQIU_COOKIE` |
+| 钉钉收到「Cookie 过期 · 请更新」 | 同上，更新后手动 Run workflow 验证 |
 | 调仓成功、评论失败 | 讨论区 API 域名不同，可忽略 |
 
 ## 改持仓 / 关注组合

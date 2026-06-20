@@ -131,6 +131,7 @@ from xueqiu.integrations.xueqiu.portfolio import (
     fetch_portfolio_rebalance,
     validate_portfolio_id,
 )
+from xueqiu.integrations.xueqiu.auth import COOKIE_REFRESH_HINT, is_cookie_invalid_text, load_cookie
 from xueqiu.integrations.xueqiu.posts import fetch_stock_posts
 
 _SINA_SPOT_HEADERS = {
@@ -1049,6 +1050,33 @@ def _compute_copy_plan_safe(updates: list[PortfolioUpdate] | None = None) -> dic
     return None
 
 
+def _probe_xueqiu_cookie() -> dict[str, Any]:
+    """启动时探测 Cookie 是否仍可拉调仓 API。"""
+    try:
+        cookie = load_cookie()
+    except RuntimeError as exc:
+        return {"ok": False, "message": str(exc)}
+
+    probe_pid = (WATCH_PORTFOLIOS[0] if WATCH_PORTFOLIOS else "ZH3337164").strip().upper()
+    try:
+        client = XueQiuApiClient()
+        fetch_portfolio_rebalance(probe_pid, client=client)
+        return {"ok": True, "message": ""}
+    except Exception as exc:
+        if is_cookie_invalid_text(str(exc)):
+            return {"ok": False, "message": str(exc)}
+        print(f"Cookie 探测出现非登录类错误（忽略）: {exc}")
+        return {"ok": True, "message": ""}
+
+
+def _cookie_alert_payload(message: str) -> dict[str, str]:
+    return {
+        "title": "雪球 Cookie 已失效",
+        "message": message.strip(),
+        "hint": COOKIE_REFRESH_HINT,
+    }
+
+
 def send_dingtalk_digest(
     *,
     run_time: str,
@@ -1058,6 +1086,7 @@ def send_dingtalk_digest(
     force_markdown: bool = False,
     include_holdings: bool = False,
     copy_plan: dict[str, Any] | None = None,
+    cookie_alert: dict[str, str] | None = None,
 ) -> None:
     """推送简报：默认 HTML 渲染为图片；失败时回退 Markdown。"""
     from digest import render as digest_render
@@ -1065,6 +1094,8 @@ def send_dingtalk_digest(
     updates = updates or []
     watch_summary = _build_watch_summary(updates)
     title = _digest_push_title(updates)
+    if cookie_alert and not updates:
+        title = "Cookie 过期 · 请更新"
     simulate_note = f"模拟 {TEST_SIMULATE_NOW}" if TEST_SIMULATE_NOW else ""
     push_mode = digest_render.DIGEST_PUSH_MODE or "image"
 
@@ -1078,6 +1109,7 @@ def send_dingtalk_digest(
                 updates=updates,
                 watch_summary=watch_summary,
                 copy_plan=copy_plan,
+                cookie_alert=cookie_alert,
                 title=title,
             )
             if ok and push_mode == "image":
@@ -1101,6 +1133,19 @@ def send_dingtalk_digest(
         f"> {run_time}",
         "",
     ]
+    if cookie_alert:
+        md_parts.extend(
+            [
+                "### ⚠️ Cookie 已失效",
+                "",
+                cookie_alert.get("message", ""),
+                "",
+                cookie_alert.get("hint", COOKIE_REFRESH_HINT),
+                "",
+                "---",
+                "",
+            ]
+        )
     if holdings_md:
         md_parts.append(holdings_md.rstrip())
         md_parts.append("")
@@ -1165,6 +1210,8 @@ def check_portfolio_for_nightly_digest(
         )
     except Exception as exc:
         print(f"[{pid}] 获取调仓历史失败: {exc}")
+        if is_cookie_invalid_text(str(exc)):
+            raise
         return None
 
     if not new_batches_raw:
@@ -1272,16 +1319,29 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
     ai_budget = [MAX_AI_CALLS_PER_RUN]
     quotes: list[HoldingQuote] | None = None
     account_summary: AccountSummary | None = None
+    cookie_alert: dict[str, str] | None = None
+
+    cookie_probe = _probe_xueqiu_cookie()
+    if not cookie_probe.get("ok"):
+        cookie_alert = _cookie_alert_payload(str(cookie_probe.get("message") or "Cookie 无效"))
+        print(f"Cookie 探测失败: {cookie_probe.get('message')}")
 
     try:
-        if not skip_portfolios and WATCH_PORTFOLIOS:
+        if not skip_portfolios and WATCH_PORTFOLIOS and not cookie_alert:
             client = XueQiuApiClient()
             portfolios = [p.strip().upper() for p in WATCH_PORTFOLIOS if p.strip()]
             total = len(portfolios)
             for index, pid in enumerate(portfolios, 1):
-                upd = check_portfolio_for_nightly_digest(
-                    client, pid, state, ai_budget=ai_budget
-                )
+                try:
+                    upd = check_portfolio_for_nightly_digest(
+                        client, pid, state, ai_budget=ai_budget
+                    )
+                except Exception as exc:
+                    if is_cookie_invalid_text(str(exc)):
+                        cookie_alert = _cookie_alert_payload(str(exc))
+                        print(f"巡检中断（Cookie 失效）: {exc}")
+                        break
+                    raise
                 if upd is not None:
                     updates.append(upd)
                 if index < total:
@@ -1291,6 +1351,8 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
                 print(f"\n本 run 已调用 DeepSeek {used} 次（上限 {MAX_AI_CALLS_PER_RUN}）。")
         elif skip_portfolios:
             print("已跳过组合调仓巡检（--holdings-only）。")
+        elif cookie_alert:
+            print("Cookie 无效，已跳过组合调仓巡检。")
 
         state["last_digest_at"] = run_time
 
@@ -1305,7 +1367,7 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
             print("\n计算抄作业调仓方案（仅本次新调仓）…")
             copy_plan = _compute_copy_plan_safe(updates)
 
-        should_send = bool(updates)
+        should_send = bool(updates) or bool(cookie_alert)
         if should_send:
             send_dingtalk_digest(
                 run_time=run_time,
@@ -1315,6 +1377,7 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
                 force_markdown=force_markdown,
                 include_holdings=False,
                 copy_plan=copy_plan,
+                cookie_alert=cookie_alert,
             )
         else:
             print("关注组合无新调仓，已更新本地持仓记录但不发送钉钉。")

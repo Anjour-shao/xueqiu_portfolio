@@ -236,3 +236,24 @@ def load_cookie(*, cookie_file: Path | None = None) -> str:
         "未找到有效雪球 Cookie。请运行 python ../scripts/xueqiu_login.py 扫码登录，"
         "或将 Cookie 写入 data/xueqiu_cookie.txt，或设置环境变量 XUEQIU_COOKIE。"
     )
+
+
+def is_cookie_invalid_text(text: str) -> bool:
+    msg = str(text or "")
+    return any(
+        token in msg
+        for token in (
+            "Cookie 已失效",
+            "登录态失效",
+            "400016",
+            "重新登录",
+            "未找到有效雪球 Cookie",
+            "缺少 xq_a_token",
+        )
+    )
+
+
+COOKIE_REFRESH_HINT = (
+    "本地：运行 python scripts/xueqiu_login.py，更新 data/xueqiu_cookie.txt 后重启后端。"
+    "云端 Actions：GitHub 仓库 Settings → Secrets → 更新 XUEQIU_COOKIE（粘贴新 Cookie 全文）。"
+)

@@ -49,6 +49,11 @@ jobs:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
           DINGTALK_KEYWORD: ${{ secrets.DINGTALK_KEYWORD }}
           IMG_BB_API_KEY: ${{ secrets.IMG_BB_API_KEY }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_BUCKET_NAME: ${{ secrets.OSS_BUCKET_NAME }}
+          OSS_CUSTOM_DOMAIN: ${{ secrets.OSS_CUSTOM_DOMAIN }}
           DIGEST_PUSH_MODE: image
         run: |
           set -euo pipefail
