@@ -58,7 +58,10 @@ Workflow：[`.github/workflows/daily_digest.yml`](../.github/workflows/daily_dig
 | `DEEPSEEK_BASE_URL` | 建议 `https://api.deepseek.com` |
 | `DINGTALK_WEBHOOK` | 钉钉 Webhook |
 | `DINGTALK_KEYWORD` | 钉钉安全关键词（如 `组合`） |
-| `IMG_BB_API_KEY` | 图床 Key（钉钉 PNG 必需） |
+| `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` | 阿里云 OSS 图床（推荐） |
+| `OSS_ENDPOINT` / `OSS_BUCKET_NAME` / `OSS_CUSTOM_DOMAIN` | OSS 桶与访问域名 |
+| `IMG_BB_API_KEY` | 图床备选（OSS 不可用时回退） |
+| `ACCOUNT_DASHBOARD_DATABASE_URL` | 可选；配置后从库读「我的持仓」，否则用脚本内 `MY_HOLDINGS` |
 
 ### 立即验证
 
@@ -101,7 +104,7 @@ $env:GITHUB_TOKEN = "ghp_..."
 | 日志现象 | 处理 |
 |----------|------|
 | Playwright / chromium 报错 | workflow 已 `playwright install --with-deps chromium` |
-| 图片失败 | 补全 `IMG_BB_API_KEY`，或回退 Markdown |
+| 图片失败 | 检查 OSS 配置或 `IMG_BB_API_KEY` 回退，或 `--push-markdown` |
 | `返回 HTML` / `400016` | Cookie 过期，本地 `scripts/xueqiu_login.py` 后更新 Secret |
 | 调仓成功、评论失败 | 讨论区 API 域名不同，可忽略 |
 

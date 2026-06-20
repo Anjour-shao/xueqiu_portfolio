@@ -1,153 +1,165 @@
-# 雪球组合调仓分析
+# 雪球组合 · 调仓分析与抄作业工具
 
-基于雪球组合调仓日志的录入、收益统计与组合监控工具。全部雪球数据抓取已统一为 **requests + Cookie API**，无需浏览器（云端友好）。
+个人使用的雪球（Xueqiu）组合分析项目：**录入/同步调仓 → 虚拟净值与收益统计 → 多组合对比 → 抄作业策略回测 → 挖组合 → 每日钉钉简报**。
+
+技术栈：**FastAPI + MySQL + React (MUI)**。雪球数据抓取统一为 **requests + Cookie API**，适合本地与云端定时任务，无需浏览器自动化（登录除外）。
+
+---
+
+## 功能概览
+
+| 模块 | 说明 |
+|------|------|
+| **总览** | 已入库 ZH 组合卡片、收益排行、快捷入口 |
+| **我的持仓** | 维护实盘持仓/现金，选择抄作业策略；调仓方案仅在「有新组合调仓推送」时针对该批信号生成 |
+| **挖组合** | 从雪球社交/自选等渠道扩展候选 ZH，预览、筛选、入库 |
+| **数据同步** | 一键全量：调仓、后复权行情、官方净值 |
+| **组合对比** | 多组合净值曲线同屏对比 |
+| **抄作业回测** | 多策略 catalog（含「信念分级·师傅信用」等），合并跟单回测 |
+| **每日 Digest** | 独立模块：关注组合调仓巡检 → HTML 渲染图片 → 阿里云 OSS → 钉钉推送（见 [daily_digest/README.md](daily_digest/README.md)） |
+
+---
+
+## 快速开始
+
+### 1. 数据库
+
+MySQL 库名建议 `portfolio`：
+
+```bash
+mysql -u root -p portfolio < sql/schema.sql
+```
+
+表会在后端启动时自动补齐迁移（如 `mined_cubes`、个人持仓 `personal_*` 等）。
+
+### 2. 后端配置
+
+```bash
+cd backend
+copy .env.example .env
+pip install -r requirements.txt
+```
+
+`.env` 最少需要：
+
+```bash
+ACCOUNT_DASHBOARD_DATABASE_URL=mysql+pymysql://用户:密码@127.0.0.1:3306/portfolio?charset=utf8mb4
+ACCOUNT_DASHBOARD_PORT=8011
+```
+
+可选：`TUSHARE_API_KEY`、`DINGTALK_WEBHOOK`、`DEEPSEEK_API_KEY`、OSS 图床变量（Digest 用）。
+
+### 3. 雪球 Cookie
+
+```bash
+cd backend
+pip install -e ".[login]"              # 仅本地登录需要 DrissionPage
+python ../scripts/xueqiu_login.py      # 扫码 → data/xueqiu_cookie.txt
+```
+
+Cookie 过期后重新登录并更新 `data/xueqiu_cookie.txt`（已在 `.gitignore`，勿提交）。
+
+### 4. 启动
+
+```bash
+# 终端 1
+cd backend && python main.py
+
+# 终端 2
+cd frontend && npm install && npm run dev
+```
+
+- 前端：<http://localhost:5176>（Vite 代理 `/api` → 8011）
+- 健康检查：<http://127.0.0.1:8011/health>
+
+---
 
 ## 目录结构
 
 ```
 xueqiu/
 ├── README.md
-├── daily_digest/                  # 云端每日 Digest（GHA，见 daily_digest/README.md）
-├── sql/                           # 数据库脚本
-├── scripts/                       # 命令行运维（见 scripts/README.md）
-│   ├── xueqiu_login.py            # 扫码写 Cookie
-│   ├── xueqiu_monitor.py          # 调仓巡检 + 钉钉 + DeepSeek
-│   ├── sync_cube_nav.py           # 官方日净值同步
-│   ├── sync_quotes.py             # 后复权行情同步
-│   ├── sync_tushare_aux.py        # 基准指数（TuShare，可选）
-│   └── backtest_copy_portfolios.py
-├── backend/
-│   ├── main.py                    # 启动 API
+├── backend/                 # FastAPI 服务
+│   ├── main.py
+│   ├── requirements.txt
 │   └── xueqiu/
-│       ├── config.py              # 环境变量
-│       ├── api/                   # FastAPI 路由与业务编排
-│       ├── domain/                # 核心业务（净值、回测、代码转换）
-│       ├── storage/               # 数据库
-│       ├── integrations/          # 外部数据源
-│       │   ├── xueqiu/            # 雪球 HTTP API（调仓、讨论、用户发言）
-│       │   └── sina/              # 新浪后复权价 / 指数
-│       └── sync/                  # 批处理同步任务
-├── data/
-│   └── xueqiu_cookie.txt          # 雪球登录凭证（gitignore）
-└── frontend/                      # React 看板
+│       ├── api/             # HTTP 路由
+│       ├── domain/          # 净值、回测、挖组合、个人持仓
+│       ├── storage/         # SQLAlchemy 表
+│       ├── integrations/    # 雪球 / 新浪行情
+│       └── sync/            # 批处理同步
+├── frontend/                # React 看板
+├── daily_digest/            # 每日钉钉简报（可独立 GHA 部署）
+├── scripts/                 # 命令行运维（见 scripts/README.md）
+├── sql/                     # 初始 schema
+├── docs/                    # 策略/部署说明（供深入阅读）
+└── data/
+    └── xueqiu_cookie.txt    # 本地 Cookie（gitignore）
 ```
 
-## 分层说明
+**不会提交到 Git 的生成物**（见 `.gitignore`）：`digest_output/`、`*__pycache__*`、`scripts/backtest_output/`、`frontend/dist/`、`.env`、Cookie 等。
 
-| 层 | 路径 | 职责 |
-|---|---|---|
-| **api** | `backend/xueqiu/api/` | HTTP 接口、看板、导入、同步编排 |
-| **domain** | `backend/xueqiu/domain/` | 虚拟净值法、抄作业回测、代码格式转换 |
-| **storage** | `backend/xueqiu/storage/` | MySQL 表定义与连接 |
-| **integrations** | `backend/xueqiu/integrations/` | 雪球 API、新浪行情等外部 I/O |
-| **sync** | `backend/xueqiu/sync/` | 行情批量同步逻辑 |
-| **scripts** | `scripts/` | 命令行运维工具 |
+---
 
-## 数据库
+## 常用运维
 
-MySQL 库名 `portfolio`，4 张表：`accounts`、`rebalance_trades`、`quote_points`、`benchmark`。
-
-```bash
-mysql -u root -p portfolio < sql/schema.sql
-```
-
-## 配置
-
-```bash
-cd backend
-copy .env.example .env
-```
-
-```bash
-ACCOUNT_DASHBOARD_DATABASE_URL=mysql+pymysql://用户名:密码@127.0.0.1:3306/portfolio?charset=utf8mb4
-TUSHARE_API_KEY=你的TUSHARE_TOKEN          # 可选
-BENCHMARK_TS_CODE=000001.SH
-DINGTALK_WEBHOOK=                          # 可选，monitor 钉钉推送
-DEEPSEEK_API_KEY=                          # 可选，monitor AI 分析
-```
-
-## 雪球认证（Cookie）
-
-**本地首次登录：**
-
-```bash
-cd backend
-pip install -e ".[login]"          # 仅本地需要，含 DrissionPage
-python ../scripts/xueqiu_login.py  # 弹窗扫码，写入 data/xueqiu_cookie.txt
-```
-
-**云端部署：** 上传 `data/xueqiu_cookie.txt`，或设置环境变量 `XUEQIU_COOKIE`。生产环境 `pip install -e .` 即可，不需要 DrissionPage。
-
-Cookie 过期后重新在本地运行 `xueqiu_login.py` 并上传新文件。
-
-## 启动
-
-**后端：**
-
-```bash
-cd backend
-pip install -r requirements.txt    # 或 pip install -e .
-python main.py
-```
-
-**前端：**
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-- 前端：http://localhost:5176（API 代理到 **8011**）
-- 后端：http://localhost:8011（`backend/.env` 中 `ACCOUNT_DASHBOARD_PORT=8011`）
-
-若仍出现 API 404：8010 上可能残留旧进程。请只保留一个后端（`cd backend && python main.py`），并**重启**前端 `npm run dev` 使代理生效。`/health` 应含 `api_version: "0.5.0"`。
-
-## 常用命令
+在项目根目录：
 
 ```bash
 cd backend
 
-# 调仓巡检
-python ../scripts/xueqiu_monitor.py
-
-# 行情同步（个股 HFQ）
-python ../scripts/sync_quotes.py
-
-# 官方净值同步（看板 K 线）
-python ../scripts/sync_cube_nav.py
-
-# 抄作业回测 CLI
-python ../scripts/backtest_copy_portfolios.py
+python ../scripts/sync_quotes.py          # 后复权行情
+python ../scripts/sync_cube_nav.py        # 官方净值
+python ../scripts/xueqiu_monitor.py       # 调仓巡检 + 钉钉（旧版单脚本）
+python ../scripts/backtest_copy_portfolios.py   # CLI 回测
 ```
 
-## 数据流
+前端「数据同步」页可替代大部分手动同步。每日简报推荐走 `daily_digest/daily_portfolio_digest.py` 或 GitHub Actions。
 
-```
-雪球 API（调仓 / 讨论）
-        ↓
-  rebalance_trades
-        ↓
- sync/sync_quotes.py（新浪后复权价）
-        ↓
- domain/nav_engine.py（虚拟净值法）
-        ↓
-  看板 API → 累计/基准/超额收益
-```
+---
 
-## API 路由
+## API 摘要
 
 | 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/accounts` | 账户列表 |
-| GET | `/api/dashboard/{account_key}` | 看板数据 |
-| POST | `/api/sync-xueqiu/{account_key}` | 雪球 API 抓取单个组合最新调仓 |
-| POST | `/api/sync-xueqiu-all` | 雪球全量抓取 |
-| POST | `/api/import-logs` | 导入调仓日志 |
-| POST | `/api/recompute/{account_key}` | 重算收益 |
+|------|------|------|
+| GET | `/api/accounts` | 组合账户列表 |
+| GET | `/api/dashboard/{code}` | 单组合看板 |
+| GET | `/api/portfolios/overview-stats` | 总览统计 |
+| POST | `/api/sync-xueqiu-all` | 全量抓取调仓 |
+| POST | `/api/sync-quotes` | 同步行情 |
+| GET | `/api/discovery/cubes` | 挖组合候选列表 |
+| POST | `/api/backtest-copy` | 抄作业回测 |
+| GET | `/api/personal-account` | 我的持仓 |
+| POST | `/api/personal-account/trade` | 记录买卖 |
 
-## 每日组合 Digest（GitHub Actions）
+完整路由见 `backend/xueqiu/api/main.py`。
 
-云端独立模块，每晚推送关注组合调仓 + 个人持仓（HTML → 图片 → 钉钉）。
+---
 
-配置与部署见 [daily_digest/README.md](daily_digest/README.md)。
+## 测试
+
+单元测试在 `backend/tests/`，不含临时脚本：
+
+```bash
+cd backend
+python -m pytest tests/ -q
+```
+
+---
+
+## 延伸阅读
+
+| 文档 | 内容 |
+|------|------|
+| [scripts/README.md](scripts/README.md) | 各运维脚本说明 |
+| [daily_digest/README.md](daily_digest/README.md) | 钉钉简报、OSS 图床、GHA |
+| [docs/DIGEST_GITHUB_SETUP.md](docs/DIGEST_GITHUB_SETUP.md) | Actions 部署 |
+| [docs/conviction_copy_strategy_brief_for_ai.md](docs/conviction_copy_strategy_brief_for_ai.md) | 主推抄作业策略设计说明 |
+
+---
+
+## 说明
+
+本项目为个人研究/自用工具，**不构成投资建议**。雪球 API 非官方公开接口，请控制请求频率并自行承担使用风险。
+
+License: 见 [LICENSE](LICENSE)
