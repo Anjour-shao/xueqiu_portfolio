@@ -59,14 +59,33 @@ def _fmt_money(amount: float | None, *, signed: bool = True) -> str:
     return f"{amount:,.2f}"
 
 
-def _truncate(text: str, limit: int = 380) -> str:
-    compact = _normalize_ai_summary(text)
+def _truncate(text: str, limit: int = 1400) -> str:
+    compact = clean_ai_summary(text)
     if len(compact) <= limit:
         return compact
-    return compact[:limit].rstrip() + "…"
+    cut = compact[:limit].rstrip()
+    for sep in ("\n\n", "\n", "。"):
+        last = cut.rfind(sep)
+        if last > limit * 0.45:
+            cut = cut[: last + (len(sep) if sep != "\n\n" else 0)]
+            break
+    return cut.rstrip()
 
 
-def _normalize_ai_summary(text: str) -> str:
+_AI_FILLER_RES = [
+    re.compile(r"^好的[，,]?"),
+    re.compile(r"^作为.*分析师"),
+    re.compile(r"^我已从.*提取"),
+    re.compile(r"^根据.*评论"),
+    re.compile(r"^根据最新的?市场舆情"),
+    re.compile(r"^综合各方信息"),
+    re.compile(r"^为您呈现"),
+    re.compile(r"^以下是对"),
+    re.compile(r"^过滤情绪化"),
+]
+
+
+def clean_ai_summary(text: str) -> str:
     raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     lines: list[str] = []
     for ln in raw.split("\n"):
@@ -74,13 +93,20 @@ def _normalize_ai_summary(text: str) -> str:
         ln = re.sub(r"^[\s\u3000]+", "", ln)
         ln = re.sub(r"^#+\s*", "", ln)
         ln = re.sub(r"^[-*•]\s*", "", ln)
-        if ln:
-            lines.append(ln)
+        if not ln:
+            continue
+        if any(p.search(ln) for p in _AI_FILLER_RES):
+            continue
+        lines.append(ln)
     compact = "\n".join(lines)
     return re.sub(r"\n{3,}", "\n\n", compact).strip()
 
 
-def _ai_summary_to_lines(text: str, limit: int = 380) -> list[str]:
+def _normalize_ai_summary(text: str) -> str:
+    return clean_ai_summary(text)
+
+
+def _ai_summary_to_lines(text: str, limit: int = 1400) -> list[str]:
     compact = _truncate(text, limit)
     if not compact:
         return []
@@ -235,14 +261,12 @@ def build_report_context(
                     "name": item.get("stock_name", ""),
                     "code": item.get("ts_code", ""),
                     "shares_delta": item.get("shares_delta", 0),
-                    "current_shares": item.get("current_shares", 0),
-                    "target_shares": item.get("target_shares", 0),
-                    "weight_change": (
-                        f"{item.get('current_weight_pct', 0):.1f}% → {item.get('target_weight_pct', 0):.1f}%"
-                    ),
-                    "price": item.get("price"),
+                    "suggest_weight_fmt": f"{item.get('target_weight_pct', 0):.1f}%",
                     "price_fmt": f"{item.get('price'):.2f}" if item.get("price") else "-",
                     "amount_fmt": _fmt_money(item.get("amount")),
+                    "weight_change": (
+                        f"现 {item.get('current_weight_pct', 0):.1f}% → 建议 {item.get('target_weight_pct', 0):.1f}%"
+                    ),
                 }
             )
         ctx["copy_plan"] = {

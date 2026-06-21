@@ -350,13 +350,12 @@ def call_deepseek_summary(stock_name: str, comments: str, *, verbose: bool = Fal
         print(f"      >>> 调用 DeepSeek API（base={DEEPSEEK_BASE_URL}, key={key_hint}）")
 
     prompt = f"""
-你是一个专业的A股量化投研助手。请根据以下雪球用户的近期原生评论，深度分析当前市场对【{stock_name}】的共识与分歧。
+你是一个专业的A股量化投研助手。请根据以下雪球用户的近期原生评论，分析当前市场对【{stock_name}】的共识与分歧。
 
 输出要求：
-1. 请分为三个维度进行结构化总结：【看多逻辑】、【看空隐患】、【关键事件/基本面追踪】。
-2. 提取评论中提及的核心产业逻辑、订单传闻或财报预期。
-3. 过滤纯情绪宣泄，只保留有信息量的论点。
-4. 字数控制在300-500字左右，格式要求使用 Markdown 小标题与列表，排版清晰易读。
+1. 直接从【看多逻辑】、【看空隐患】、【关键事件/基本面追踪】三个小标题开始，不要任何开场白、自我称呼或复述任务。
+2. 提取评论中的核心产业逻辑、订单传闻或财报预期；过滤纯情绪宣泄。
+3. 每个维度 2-4 条要点，总字数 260-380 字，不要用省略号截断句式。
 
 评论原始数据：
 {comments}
@@ -367,7 +366,7 @@ def call_deepseek_summary(stock_name: str, comments: str, *, verbose: bool = Fal
             messages=[
                 {
                     "role": "system",
-                    "content": "你是一个客观严谨的金融AI分析师，擅长从噪音中提取核心商业和市场逻辑。",
+                    "content": "你是客观严谨的金融分析师。禁止开场白，直接输出三个维度要点。",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -390,20 +389,21 @@ def fetch_rebalances_since(
     since_time: str,
     *,
     as_of: datetime | None = None,
+    today_only: bool = False,
+    lookback_days: int = 2,
 ) -> list[dict[str, Any]]:
-    """拉取 (since_time, as_of] 区间内所有手动调仓批次（时间升序）。"""
-    pid = validate_portfolio_id(portfolio_id)
+    """拉取 (since_time, as_of] 区间内、晚于上次推送的手动调仓。
 
-    # 从未推送过：只认最新一批，避免把 2023 年起全部历史当「新调仓」
+    默认不按「仅当天」过滤，而是靠 since_time（last_notified）防历史重复；
+    lookback_days 限制最远回溯日历天数，避免 state 异常时一次性补推过多旧批次。
+    """
+    pid = validate_portfolio_id(portfolio_id)
+    as_of_dt = as_of or _now()
+
     if not since_time:
-        try:
-            latest = fetch_portfolio_rebalance(pid, client=client)
-            return [latest]
-        except Exception:
-            return []
+        return []
 
     since_dt = _parse_rebalance_dt(since_time)
-    as_of_dt = as_of or _now()
     portfolio_name = _fetch_portfolio_name(client, pid)
 
     found: list[dict[str, Any]] = []
@@ -432,6 +432,12 @@ def fetch_rebalances_since(
                 continue
             if rt_dt > as_of_dt:
                 continue
+            if today_only and rt_dt.date() != as_of_dt.date():
+                continue
+            if lookback_days > 0:
+                earliest = as_of_dt.date() - timedelta(days=lookback_days - 1)
+                if rt_dt.date() < earliest:
+                    continue
             found.append(crawled)
 
         if stop_paging or len(batches) < page_size:
@@ -840,11 +846,10 @@ def _holdings_markdown(quotes: list[HoldingQuote], account: AccountSummary) -> s
     return "\n".join(lines)
 
 
-def _truncate_ai_text(text: str, limit: int = 420) -> str:
-    compact = re.sub(r"\n{3,}", "\n\n", text.strip())
-    if len(compact) <= limit:
-        return compact
-    return compact[:limit].rstrip() + "…"
+def _truncate_ai_text(text: str, limit: int = 1400) -> str:
+    from digest.render import _truncate
+
+    return _truncate(text, limit)
 
 
 def _portfolio_update_markdown(update: PortfolioUpdate) -> str:
@@ -1022,23 +1027,9 @@ def _compute_copy_plan_safe(updates: list[PortfolioUpdate] | None = None) -> dic
     if not updates:
         return None
     try:
-        from xueqiu.domain.personal_account import compute_copy_rebalance_plan
+        from xueqiu.domain.personal_account import compute_copy_rebalance_plan_from_digest_updates
 
-        rebalance_times: list[str] = []
-        trigger_codes: list[str] = []
-        for upd in updates:
-            for batch in upd.batches:
-                if batch.rebalance_time:
-                    rebalance_times.append(batch.rebalance_time)
-                for record in batch.records or []:
-                    code = str(record.get("code") or "").strip()
-                    if code:
-                        trigger_codes.append(code)
-
-        plan = compute_copy_rebalance_plan(
-            rebalance_times=rebalance_times,
-            trigger_codes=trigger_codes,
-        )
+        plan = compute_copy_rebalance_plan_from_digest_updates(updates)
         if plan.get("actions"):
             print(f"抄作业调仓方案: {len(plan['actions'])} 笔（{plan.get('strategy_label')}，仅本次新调仓）")
             return plan
@@ -1203,6 +1194,17 @@ def check_portfolio_for_nightly_digest(
     as_of = _now()
 
     print(f"\n[{pid}] 晚间巡检（自 {last_notified or '从未推送'} 至 {as_of.strftime('%Y-%m-%d %H:%M')}）…")
+
+    if not last_notified:
+        try:
+            latest = fetch_portfolio_rebalance(pid, client=client)
+            rt = str(latest.get("rebalance_time") or "")
+            if rt:
+                _set_portfolio_last_notified(state, pid, rt)
+                print(f"[{pid}] 首次巡检：已同步基准 {rt}，不推送历史调仓。")
+        except Exception as exc:
+            print(f"[{pid}] 首次同步基准失败: {exc}")
+        return None
 
     try:
         new_batches_raw = fetch_rebalances_since(

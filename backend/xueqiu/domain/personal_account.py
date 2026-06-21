@@ -342,6 +342,141 @@ INCREMENTAL_PLAN_WAIT_NOTE = (
 )
 
 
+def compute_copy_rebalance_plan_from_digest_updates(
+    updates: list[Any],
+    *,
+    strategy_id: str | None = None,
+) -> dict[str, Any]:
+    """根据「今晚推送的调仓批次」与抄作业策略，给出建议仓位（非追历史）。"""
+    from xueqiu.domain.copy_conviction import HEAVY_HOLDER_PCT, conviction_cap_pct
+
+    view = build_personal_account_view()
+    sid = strategy_id or view["strategy_id"] or DEFAULT_STRATEGY_ID
+    label = _strategy_label(sid)
+    total_assets = float(view["total_assets"] or 0)
+
+    if not updates:
+        return {
+            "strategy_id": sid,
+            "strategy_label": label,
+            "total_assets": total_assets,
+            "plan_mode": "incremental",
+            "actions": [],
+            "note": INCREMENTAL_PLAN_WAIT_NOTE,
+        }
+
+    if total_assets <= 0:
+        return {
+            "strategy_id": sid,
+            "strategy_label": label,
+            "total_assets": total_assets,
+            "plan_mode": "incremental",
+            "actions": [],
+            "note": "未配置个人持仓/现金，无法计算建议仓位（请在前端「我的持仓」维护或配置 MY_HOLDINGS）",
+        }
+
+    mirror: dict[tuple[str, str], float] = {}
+    sell_codes: set[str] = set()
+    master_weight: dict[str, float] = {}
+    names: dict[str, str] = {}
+
+    for upd in updates:
+        pid = str(getattr(upd, "portfolio_id", "") or "")
+        for batch in getattr(upd, "batches", []) or []:
+            for record in batch.records or []:
+                action = str(record.get("action") or "")
+                try:
+                    code = _norm_code(str(record.get("code") or ""))
+                except ValueError:
+                    continue
+                names[code] = str(record.get("name") or names.get(code) or code)
+                to_w = float(record.get("to_weight") or 0)
+                from_w = float(record.get("from_weight") or 0)
+                if action == "买入" and to_w >= HEAVY_HOLDER_PCT:
+                    mirror[(pid, code)] = max(mirror.get((pid, code), 0.0), to_w)
+                    master_weight[code] = max(master_weight.get(code, 0.0), to_w)
+                elif action == "卖出" and from_w > 1.0 and to_w <= 1.0:
+                    sell_codes.add(code)
+
+    target_codes = set(master_weight.keys()) | sell_codes
+    if not target_codes:
+        return {
+            "strategy_id": sid,
+            "strategy_label": label,
+            "total_assets": total_assets,
+            "plan_mode": "incremental",
+            "actions": [],
+            "note": "本次调仓无 ≥20% 重仓跟单信号（或均为卖出轻仓），策略建议保持现有持仓。",
+        }
+
+    current_map = {h["ts_code"]: h for h in view["holdings"]}
+    prices = fetch_spot_prices(list(target_codes))
+
+    actions: list[dict[str, Any]] = []
+    for code in sorted(target_codes):
+        cur = current_map.get(code)
+        cur_shares = int(cur["shares"]) if cur else 0
+        cur_weight = float(cur.get("weight_pct") or 0) if cur else 0.0
+        name = names.get(code) or (cur and cur["stock_name"]) or code
+
+        if code in master_weight:
+            cap = conviction_cap_pct(master_weight[code], mirror, code, trust=1.0)
+            target_pct = round(cap * 100, 2)
+        else:
+            target_pct = 0.0
+
+        price = prices.get(code)
+        if price and total_assets > 0:
+            target_shares = int(round(total_assets * (target_pct / 100) / price))
+            target_shares = (target_shares // _lot_size(code)) * _lot_size(code)
+        else:
+            target_shares = 0
+
+        delta = target_shares - cur_shares
+        rounded_delta = _round_lot_delta(code, delta)
+        if rounded_delta == 0:
+            continue
+
+        action = "买入" if rounded_delta > 0 else "卖出"
+        shares_abs = abs(rounded_delta)
+        tgt_shares = cur_shares + rounded_delta
+        amount = round(shares_abs * price, 2) if price else None
+
+        actions.append(
+            {
+                "action": action,
+                "ts_code": code,
+                "stock_name": name,
+                "shares_delta": shares_abs,
+                "current_shares": cur_shares,
+                "target_shares": tgt_shares,
+                "current_weight_pct": round(cur_weight, 2),
+                "target_weight_pct": target_pct,
+                "price": round(price, 4) if price else None,
+                "amount": amount,
+            }
+        )
+
+    actions.sort(key=lambda x: (-(x.get("amount") or 0), x["ts_code"]))
+
+    if actions:
+        note = (
+            f"以下根据今晚调仓信号与「{label}」规则（≥{int(HEAVY_HOLDER_PCT)}% 才跟）"
+            f"给出的建议仓位，供参考。"
+        )
+    else:
+        note = "本次调仓信号与您的持仓已基本一致（整手口径），无需调整。"
+
+    return {
+        "strategy_id": sid,
+        "strategy_label": label,
+        "total_assets": total_assets,
+        "plan_mode": "incremental",
+        "actions": actions,
+        "note": note,
+    }
+
+
 def compute_copy_rebalance_plan(
     *,
     strategy_id: str | None = None,

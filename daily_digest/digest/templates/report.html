@@ -124,24 +124,50 @@
     .rb-portfolio {
       font-size: 15px;
       font-weight: 700;
-      margin-bottom: 4px;
+      margin-bottom: 2px;
+      line-height: 1.35;
     }
     .rb-id {
       font-size: 10px;
       color: #8a9199;
-      margin-bottom: 8px;
+      font-weight: 500;
+    }
+    .rb-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 4px 8px;
+      margin-bottom: 6px;
     }
     .rb-time {
       font-size: 11px;
       color: #5c6570;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
       padding-left: 8px;
       border-left: 3px solid #3b82f6;
     }
     .rb-row {
       display: flex;
-      align-items: flex-start;
+      align-items: center;
       gap: 8px;
+    }
+    .rb-row.compact {
+      flex-wrap: wrap;
+      gap: 6px 8px;
+    }
+    .rb-detail.compact {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 4px 8px;
+    }
+    .rb-detail.compact .rb-stock { font-size: 13px; }
+    .rb-detail.compact .rb-inline {
+      font-size: 11px;
+      color: #5c6570;
+      font-variant-numeric: tabular-nums;
     }
     .rb-badge {
       flex-shrink: 0;
@@ -379,17 +405,20 @@
       {% if updates %}
       {% for upd in updates %}
       <div class="rebalance-block">
-        <div class="rb-portfolio">{{ upd.portfolio_name }}</div>
-        <div class="rb-id">{{ upd.portfolio_id }}</div>
+        <div class="rb-head">
+          <span class="rb-portfolio">{{ upd.portfolio_name }}</span>
+          <span class="rb-id">{{ upd.portfolio_id }}</span>
+        </div>
         {% for batch in upd.batches %}
         <div class="rb-time">{{ batch.rebalance_time }}</div>
         {% for item in batch.records %}
         <div class="rb-trade">
-          <div class="rb-row">
+          <div class="rb-row compact">
             <span class="rb-badge {{ item.badge_cls }}">{{ item.action_short }}</span>
-            <div class="rb-detail">
-              <div class="rb-stock">{{ item.name }} <span style="font-weight:400;color:#8a9199">{{ item.code }}</span></div>
-              <div class="rb-extra">{{ item.price }} · {{ item.weight_change }}</div>
+            <div class="rb-detail compact">
+              <span class="rb-stock">{{ item.name }}</span>
+              <span class="rb-inline">{{ item.code }}</span>
+              <span class="rb-inline">{{ item.price }} · {{ item.weight_change }}</span>
             </div>
           </div>
           {% if item.ai_summary %}
@@ -429,23 +458,23 @@
 
     {% if copy_plan %}
     <div class="card">
-      <div class="card-title">抄作业调仓方案</div>
+      <div class="card-title">抄作业建议仓位</div>
       <div class="plan-strategy">{{ copy_plan.strategy_label }} · {{ copy_plan.strategy_id }}</div>
       <div class="plan-hint">{{ copy_plan.note or "以下仅针对本次新推送的组合调仓，按策略跟单规则给出参考，非追历史仓位。" }}</div>
+      {% if copy_plan.actions %}
       {% for item in copy_plan.actions %}
       <div class="rb-trade">
-        <div class="rb-row">
+        <div class="rb-row compact">
           <span class="rb-badge {{ item.badge_cls }}">{{ item.action_short }}</span>
-          <div class="rb-detail">
-            <div class="rb-stock">{{ item.name }} <span style="font-weight:400;color:#8a9199">{{ item.code }}</span></div>
-            <div class="rb-extra">
-              {{ item.shares_delta }} 股 · {{ item.current_shares }} → {{ item.target_shares }} 股 · {{ item.weight_change }}
-            </div>
-            <div class="rb-extra">{{ item.price_fmt }} · 约 {{ item.amount_fmt }}</div>
+          <div class="rb-detail compact">
+            <span class="rb-stock">{{ item.name }}</span>
+            <span class="rb-inline">{{ item.code }}</span>
+            <span class="rb-inline">建议 {{ item.suggest_weight_fmt }} · {{ item.shares_delta }}股 · {{ item.price_fmt }} · 约{{ item.amount_fmt }}</span>
           </div>
         </div>
       </div>
       {% endfor %}
+      {% endif %}
     </div>
     {% endif %}
 

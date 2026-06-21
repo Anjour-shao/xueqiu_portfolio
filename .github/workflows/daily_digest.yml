@@ -21,10 +21,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: daily_digest/daily_digest_state.json
-          key: daily-digest-state-v4
+          key: daily-digest-state-v5
           restore-keys: |
+            daily-digest-state-v5
             daily-digest-state-v4
-            daily-digest-state-v3
             daily-digest-state-v1
 
       - name: Set up Python
@@ -48,12 +48,13 @@ jobs:
           DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL || 'https://api.deepseek.com' }}
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
           DINGTALK_KEYWORD: ${{ secrets.DINGTALK_KEYWORD }}
-          IMG_BB_API_KEY: ${{ secrets.IMG_BB_API_KEY }}
           OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
           OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
           OSS_BUCKET_NAME: ${{ secrets.OSS_BUCKET_NAME }}
           OSS_CUSTOM_DOMAIN: ${{ secrets.OSS_CUSTOM_DOMAIN }}
+          ACCOUNT_DASHBOARD_DATABASE_URL: ${{ secrets.ACCOUNT_DASHBOARD_DATABASE_URL }}
+          IMG_BB_API_KEY: ${{ secrets.IMG_BB_API_KEY }}
           DIGEST_PUSH_MODE: image
         run: |
           set -euo pipefail
