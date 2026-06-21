@@ -24,11 +24,78 @@ daily_digest/
    - `DEEPSEEK_BASE_URL`（可选）
    - OSS 图床变量（推荐，见下表）
    - 雪球 Cookie：**本地**用 `data/xueqiu_cookie.txt`；**GHA** 用 Secret `XUEQIU_COOKIE`（见下文）
-3. 安装依赖并执行：
+3. 安装依赖：
 
 ```bash
-pip install -r daily_digest/requirements.txt
+pip install -r daily_digest/requirements.txt -r backend/requirements.txt
 playwright install --with-deps chromium
+```
+
+状态文件 **`daily_digest/daily_digest_state.json`**（v3，已 gitignore）记录各组合「上次已推送的调仓时间」。
+
+### 基准 state 文件在哪
+
+| 环境 | 路径 |
+|------|------|
+| **本地** | `daily_digest/daily_digest_state.json` |
+| **GitHub Actions** | 同路径，由 Actions Cache `daily-digest-state-v5` 持久化（不在仓库里） |
+
+可复制示例再改：
+
+```bash
+cp daily_digest/daily_digest_state.example.json daily_digest/daily_digest_state.json
+```
+
+### 手动改基准做测试
+
+核心字段是各组合的 `last_notified_rebalance_time`——Digest 只推送**晚于该时间**、且在**回溯窗口内**的新调仓：
+
+```json
+{
+  "version": 3,
+  "portfolios": {
+    "ZH3393223": {
+      "last_notified_rebalance_time": "2026-02-25 00:00:00"
+    }
+  }
+}
+```
+
+**测试步骤（本地）：**
+
+1. 把目标组合的 `last_notified_rebalance_time` 改到**你想重推的那批调仓之前**（如该组合 2/26 调仓，就改成 `2026-02-25 00:00:00`）
+2. 设置回溯天数（默认 2 天，测旧调仓需放大）：
+
+   PowerShell:
+   ```powershell
+   $env:DIGEST_LOOKBACK_DAYS=365
+   python daily_digest/daily_portfolio_digest.py
+   ```
+3. 跑完应推送并自动把 `last_notified` 更新到最新已推批次
+
+**GHA 测试：**
+
+- Run workflow 时填 **lookback_days** = `365`（workflow 输入框）
+- 若要重置云端 state：Actions → **Caches** → 删除 `daily-digest-state-v5`，再跑一轮（未推送过的组合会走「首次巡检建基准」）
+- 或本地改好 `daily_digest_state.json` 后，暂时 bump workflow 里 cache key 让它用你提交的文件（一般不推荐提交真实 state）
+
+**不改 state 的快速预览**（不写 state、不依赖基准）：
+
+```bash
+pip install -r daily_digest/requirements.txt -r backend/requirements.txt
+playwright install chromium
+python daily_digest/preview_latest_rebalance.py --portfolio ZH3393223 --push
+```
+
+`--push` 可选，会真发钉钉；默认只生成本地 PNG 到 `daily_digest/digest_output/`。
+
+### 常用命令
+
+```bash
+# 首次部署：把所有组合基准同步到「当前最新调仓」，不推送
+python daily_digest/daily_portfolio_digest.py --init-state
+
+# 正常每晚巡检
 python daily_digest/daily_portfolio_digest.py
 ```
 
@@ -37,11 +104,11 @@ python daily_digest/daily_portfolio_digest.py
 ### 本地预览调仓排版
 
 ```bash
-cd daily_digest
-python preview_latest_rebalance.py
+python daily_digest/preview_latest_rebalance.py --portfolio ZH3393223
+python daily_digest/preview_latest_rebalance.py --portfolio ZH3393223 --push
 ```
 
-预览图输出到 `daily_digest/digest_output/`（不提交）。
+预览图输出到 `daily_digest/digest_output/`（不提交）。详见上文「手动改基准做测试」。
 
 ## GitHub Actions
 
@@ -63,6 +130,7 @@ Workflow：[`.github/workflows/daily_digest.yml`](../.github/workflows/daily_dig
 | `OSS_ENDPOINT` / `OSS_BUCKET_NAME` / `OSS_CUSTOM_DOMAIN` | OSS 桶与访问域名 |
 | `IMG_BB_API_KEY` | 图床备选（OSS 不可用时回退） |
 | `ACCOUNT_DASHBOARD_DATABASE_URL` | 可选；配置后从库读「我的持仓」，否则用脚本内 `MY_HOLDINGS` |
+| `DIGEST_LOOKBACK_DAYS` | 可选；调仓回溯日历天数，默认 `2`；测试旧调仓可设 `365` |
 
 ### Cookie 更新（本地 vs Actions）
 

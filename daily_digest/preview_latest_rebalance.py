@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from datetime import datetime
@@ -21,17 +22,14 @@ load_dotenv(REPO_ROOT / ".env")
 if not os.getenv("ACCOUNT_DASHBOARD_DATABASE_URL", "").strip():
     os.environ["ACCOUNT_DASHBOARD_DATABASE_URL"] = "sqlite:///:memory:"
 
-PREVIEW_PORTFOLIO_ID = "ZH3565914"
-INCLUDE_HOLDINGS = True
-INCLUDE_DEEPSEEK_AI = True
-PUSH_DINGTALK = False
-
 from digest import render as digest_render
 from daily_portfolio_digest import (
     MY_HOLDINGS,
     PORTFOLIO_NAMES,
     PortfolioUpdate,
     RebalanceBatchDigest,
+    _compute_copy_plan_safe,
+    _load_my_holdings_config,
     build_account_summary,
     call_deepseek_summary,
     fetch_holding_quotes,
@@ -79,27 +77,57 @@ def _build_update_from_latest(client: XueQiuApiClient, portfolio_id: str, *, wit
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="预览指定组合最新调仓简报（不写 state）")
+    parser.add_argument(
+        "--portfolio",
+        default="ZH3393223",
+        help="组合 ID，默认 ZH3393223（血战到底）",
+    )
+    parser.add_argument(
+        "--no-ai",
+        action="store_true",
+        help="跳过 DeepSeek 舆情",
+    )
+    parser.add_argument(
+        "--no-holdings",
+        action="store_true",
+        help="不拉个人持仓",
+    )
+    parser.add_argument(
+        "--push",
+        action="store_true",
+        help="推送到钉钉（默认只生成本地 PNG）",
+    )
+    args = parser.parse_args()
+
     run_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-    pid = PREVIEW_PORTFOLIO_ID.strip().upper()
+    pid = args.portfolio.strip().upper()
     print(f"=== 真实最新调仓预览 · {pid} ({run_time}) ===")
 
     client = XueQiuApiClient()
-    update = _build_update_from_latest(client, pid, with_ai=INCLUDE_DEEPSEEK_AI)
+    update = _build_update_from_latest(client, pid, with_ai=not args.no_ai)
+    copy_plan = _compute_copy_plan_safe([update])
+    if copy_plan:
+        n = len(copy_plan.get("actions") or [])
+        print(f"抄作业建议: {n} 笔 · {copy_plan.get('strategy_label')}")
 
     quotes = None
     account = None
-    if INCLUDE_HOLDINGS and MY_HOLDINGS:
-        print("\n拉取个人持仓…")
-        state = load_state()
-        quotes = fetch_holding_quotes(MY_HOLDINGS, state=state)
-        account = build_account_summary(quotes, state)
+    if not args.no_holdings:
+        holdings_cfg, account_cfg = _load_my_holdings_config()
+        if holdings_cfg:
+            print("\n拉取个人持仓…")
+            state = load_state()
+            quotes = fetch_holding_quotes(holdings_cfg, state=state)
+            account = build_account_summary(quotes, state)
 
-    if PUSH_DINGTALK:
+    if args.push:
         send_dingtalk_digest(
             run_time=run_time,
             account=account,
             quotes=quotes,
             updates=[update],
+            copy_plan=copy_plan,
         )
     else:
         context = digest_render.build_report_context(
@@ -108,6 +136,7 @@ def main() -> None:
             account=account,
             quotes=quotes,
             updates=[update],
+            copy_plan=copy_plan,
         )
         html = digest_render.render_report_html(context)
         safe = run_time.replace(":", "").replace(" ", "_").replace("-", "")[:12]

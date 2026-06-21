@@ -2,6 +2,11 @@ name: Daily Portfolio Digest
 
 on:
   workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "调仓回溯日历天数（正常 2；测试可设 365）"
+        required: false
+        default: "2"
   repository_dispatch:
     types: [run_digest]
 
@@ -39,6 +44,7 @@ jobs:
           fc-cache -f
           python -m pip install --upgrade pip
           pip install -r daily_digest/requirements.txt
+          pip install -r backend/requirements.txt
           playwright install --with-deps chromium
 
       - name: Run daily digest
@@ -56,6 +62,7 @@ jobs:
           ACCOUNT_DASHBOARD_DATABASE_URL: ${{ secrets.ACCOUNT_DASHBOARD_DATABASE_URL }}
           IMG_BB_API_KEY: ${{ secrets.IMG_BB_API_KEY }}
           DIGEST_PUSH_MODE: image
+          DIGEST_LOOKBACK_DAYS: ${{ inputs.lookback_days || '2' }}
         run: |
           set -euo pipefail
           export DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"

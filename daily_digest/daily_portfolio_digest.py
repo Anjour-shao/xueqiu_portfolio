@@ -112,6 +112,18 @@ load_dotenv(ROOT.parent / ".env")
 if not os.getenv("ACCOUNT_DASHBOARD_DATABASE_URL", "").strip():
     os.environ["ACCOUNT_DASHBOARD_DATABASE_URL"] = "sqlite:///:memory:"
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return default
+
+
+DIGEST_LOOKBACK_DAYS = _env_int("DIGEST_LOOKBACK_DAYS", 2)
+
 import requests
 from openai import OpenAI
 
@@ -1208,7 +1220,7 @@ def check_portfolio_for_nightly_digest(
 
     try:
         new_batches_raw = fetch_rebalances_since(
-            client, pid, last_notified, as_of=as_of
+            client, pid, last_notified, as_of=as_of, lookback_days=DIGEST_LOOKBACK_DAYS
         )
     except Exception as exc:
         print(f"[{pid}] 获取调仓历史失败: {exc}")
@@ -1305,6 +1317,7 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
     run_time = _now().strftime("%Y-%m-%d %H:%M")
     sim_note = f" [模拟时间，TEST_SIMULATE_NOW={TEST_SIMULATE_NOW}]" if TEST_SIMULATE_NOW else ""
     print(f"=== 每日组合 Digest ({run_time}){sim_note} ===")
+    print(f"调仓回溯天数 DIGEST_LOOKBACK_DAYS={DIGEST_LOOKBACK_DAYS}")
 
     base_url = (DEEPSEEK_BASE_URL or "https://api.deepseek.com").strip()
     print(f"DeepSeek: {base_url}")
