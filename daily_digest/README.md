@@ -46,7 +46,19 @@ playwright install --with-deps chromium
 cp daily_digest/daily_digest_state.example.json daily_digest/daily_digest_state.json
 ```
 
-### 手动改基准做测试
+### 个人持仓与 GHA 抄作业（无需手动 sync）
+
+- 在前端 **「我的持仓」** 改现金 / 买卖 / 策略 → 后端**自动**写入 `daily_digest/holdings_snapshot.json` 并上传 **OSS**（`digest/holdings_snapshot.json`）
+- **GitHub Actions** 每晚从 OSS 拉快照算「抄作业建议仓位」，**不用 commit、不用云 MySQL**
+- 本地跑 Digest 时优先读 MySQL，读不到则用 OSS/本地快照
+
+首次部署或 OSS 为空时可手动补一次：
+
+```bash
+python scripts/sync_digest_holdings.py
+```
+
+`daily_digest/daily_portfolio_digest.py` 里的 `MY_HOLDINGS` 仅作兜底，不必再手改。
 
 核心字段是各组合的 `last_notified_rebalance_time`——Digest 只推送**晚于该时间**、且在**回溯窗口内**的新调仓：
 
@@ -129,7 +141,7 @@ Workflow：[`.github/workflows/daily_digest.yml`](../.github/workflows/daily_dig
 | `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` | 阿里云 OSS 图床（推荐） |
 | `OSS_ENDPOINT` / `OSS_BUCKET_NAME` / `OSS_CUSTOM_DOMAIN` | OSS 桶与访问域名 |
 | `IMG_BB_API_KEY` | 图床备选（OSS 不可用时回退） |
-| `ACCOUNT_DASHBOARD_DATABASE_URL` | 可选；配置后从库读「我的持仓」，否则用脚本内 `MY_HOLDINGS` |
+| `ACCOUNT_DASHBOARD_DATABASE_URL` | 可选；仅本地/自建服务器有 MySQL 时需要；**GHA 用 OSS 持仓快照，不必配** |
 | `DIGEST_LOOKBACK_DAYS` | 可选；调仓回溯日历天数，默认 `2`；测试旧调仓可设 `365` |
 
 ### Cookie 更新（本地 vs Actions）

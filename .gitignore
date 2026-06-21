@@ -24,6 +24,7 @@ data/xueqiu_cookie.txt
 digest_output/
 daily_digest/daily_digest_state.json
 daily_digest/digest_output/
+daily_digest/holdings_snapshot.json
 scripts/backtest_output/
 
 .DS_Store

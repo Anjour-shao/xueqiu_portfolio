@@ -61,18 +61,18 @@ PORTFOLIO_NAMES: dict[str, str] = {
     "ZH3484875": "钽坦",
 }
 
-# 股票账户（截图 2026-05-28 收盘）；cost_price 与雪球账本「持有盈亏」反推一致
+# 兜底：无数据库 / 无快照时使用（正常由前端保存自动同步到 OSS 快照）
 MY_ACCOUNT: dict[str, Any] = {
     "name": "股票账户1",
-    "total_assets": 59092.58,
+    "cash": 27091.0,
 }
 
-# holding_days：与雪球账本「持股天数」一致；也可用 opened_at: "2026-05-16" 自动推算
+# opened_at 与雪球账本一致；holding_days 可省略（按 opened_at 自动算）
 MY_HOLDINGS: list[dict[str, Any]] = [
-    {"code": "003043", "name": "华亚智能", "shares": 300, "cost_price": 62.03, "holding_days": 12},
-    {"code": "600184", "name": "光电股份", "shares": 100, "cost_price": 30.94, "holding_days": 12},
-    {"code": "002466", "name": "天齐锂业", "shares": 200, "cost_price": 80.94, "holding_days": 17},
-    {"code": "600522", "name": "中天科技", "shares": 200, "cost_price": 25.48, "holding_days": 17},
+    {"code": "600184", "name": "光电股份", "shares": 100, "cost_price": 30.94, "opened_at": "2026-06-09"},
+    {"code": "600522", "name": "中天科技", "shares": 200, "cost_price": 25.48, "opened_at": "2026-06-04"},
+    {"code": "002466", "name": "天齐锂业", "shares": 200, "cost_price": 80.94, "opened_at": "2026-06-04"},
+    {"code": "003043", "name": "华亚智能", "shares": 300, "cost_price": 62.03, "opened_at": "2026-06-09"},
 ]
 
 # 本地仍更新 MY_HOLDINGS 到 state，但钉钉不再展示个人持仓收益。
@@ -101,6 +101,8 @@ STATE_VERSION = 3
 ROOT = Path(__file__).resolve().parent
 BACKEND = ROOT.parent / "backend"
 STATE_FILE = Path(os.getenv("DIGEST_STATE_FILE", str(ROOT / "daily_digest_state.json")))
+HOLDINGS_SNAPSHOT_FILE = ROOT / "holdings_snapshot.json"
+OSS_HOLDINGS_SNAPSHOT_KEY = "digest/holdings_snapshot.json"
 
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
@@ -1005,39 +1007,122 @@ def _build_watch_summary(updates: list[PortfolioUpdate]) -> dict[str, Any] | Non
     }
 
 
-def _load_my_holdings_config() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """优先从数据库读取个人持仓，回退脚本内 MY_HOLDINGS。"""
+def _snapshot_to_config(snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    account_raw = snapshot.get("account") if isinstance(snapshot.get("account"), dict) else {}
+    account_cfg: dict[str, Any] = {
+        "name": str(account_raw.get("name") or MY_ACCOUNT.get("name") or "股票账户"),
+        "cash": float(account_raw.get("cash") or 0),
+    }
+    if account_raw.get("strategy_id"):
+        account_cfg["strategy_id"] = str(account_raw["strategy_id"])
+    holdings = [dict(h) for h in (snapshot.get("holdings") or []) if isinstance(h, dict)]
+    return holdings, account_cfg
+
+
+def _fetch_holdings_snapshot_from_oss() -> dict[str, Any] | None:
     try:
-        from xueqiu.domain.personal_account import (
-            account_meta_for_digest,
-            holdings_for_digest,
-            seed_personal_account_from_config,
-        )
+        from xueqiu.config import OSS_CUSTOM_DOMAIN, OSS_BUCKET_NAME, OSS_ENDPOINT
+
+        if OSS_CUSTOM_DOMAIN:
+            url = f"{OSS_CUSTOM_DOMAIN.rstrip('/')}/{OSS_HOLDINGS_SNAPSHOT_KEY}"
+        elif OSS_BUCKET_NAME and OSS_ENDPOINT:
+            url = f"https://{OSS_BUCKET_NAME}.{OSS_ENDPOINT}/{OSS_HOLDINGS_SNAPSHOT_KEY}"
+        else:
+            return None
+        resp = requests.get(url, timeout=20)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        return data if isinstance(data, dict) else None
+    except Exception as exc:
+        print(f"从 OSS 读取持仓快照失败: {exc}")
+        return None
+
+
+def _load_holdings_snapshot_local() -> dict[str, Any] | None:
+    if not HOLDINGS_SNAPSHOT_FILE.exists():
+        return None
+    try:
+        data = json.loads(HOLDINGS_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"读取本地持仓快照失败: {exc}")
+        return None
+
+
+def _resolve_holdings_for_digest() -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    """持仓来源：本地 MySQL → OSS/本地快照 → 脚本兜底。"""
+    try:
+        from xueqiu.config import DATABASE_URL
+        from xueqiu.domain.personal_account import account_meta_for_digest, holdings_for_digest
         from xueqiu.storage.db import init_db
 
-        init_db()
-        seed_personal_account_from_config(
-            MY_HOLDINGS,
-            name=str(MY_ACCOUNT.get("name") or "股票账户"),
-            cash=_float_cfg(MY_ACCOUNT, "cash"),
-            total_assets=_float_cfg(MY_ACCOUNT, "total_assets"),
-        )
-        db_holdings = holdings_for_digest()
-        if db_holdings:
-            meta = account_meta_for_digest()
-            account_cfg = dict(MY_ACCOUNT)
-            account_cfg["name"] = meta.get("name") or account_cfg.get("name")
-            if meta.get("cash") is not None:
-                account_cfg["cash"] = meta["cash"]
-            return db_holdings, account_cfg
+        if not str(DATABASE_URL).startswith("sqlite"):
+            init_db()
+            db_holdings = holdings_for_digest()
+            if db_holdings:
+                meta = account_meta_for_digest()
+                account_cfg = dict(MY_ACCOUNT)
+                account_cfg["name"] = meta.get("name") or account_cfg.get("name")
+                if meta.get("cash") is not None:
+                    account_cfg["cash"] = meta["cash"]
+                return db_holdings, account_cfg, "database"
     except Exception as exc:
-        print(f"读取数据库个人持仓失败，回退 MY_HOLDINGS: {exc}")
-    return list(MY_HOLDINGS), dict(MY_ACCOUNT)
+        print(f"读取数据库个人持仓失败: {exc}")
+
+    snapshot = _fetch_holdings_snapshot_from_oss()
+    snapshot_source = "oss_snapshot"
+    if not snapshot or not snapshot.get("holdings"):
+        snapshot = _load_holdings_snapshot_local()
+        snapshot_source = "local_snapshot"
+    if snapshot and snapshot.get("holdings"):
+        holdings, account_cfg = _snapshot_to_config(snapshot)
+        return holdings, account_cfg, snapshot_source
+
+    return list(MY_HOLDINGS), dict(MY_ACCOUNT), "script_fallback"
+
+
+def _prepare_personal_account_for_digest(
+    holdings: list[dict[str, Any]] | None = None,
+    account: dict[str, Any] | None = None,
+) -> bool:
+    """GHA 等无 MySQL 场景：用快照/脚本持仓灌 sqlite，供抄作业方案计算。"""
+    holdings_cfg = holdings if holdings is not None else list(MY_HOLDINGS)
+    account_cfg = account if account is not None else dict(MY_ACCOUNT)
+    if not holdings_cfg:
+        return False
+    try:
+        from xueqiu.config import DATABASE_URL
+        from xueqiu.domain.personal_account import seed_personal_account_from_config
+        from xueqiu.storage.db import init_db, init_personal_db
+
+        if str(DATABASE_URL).startswith("sqlite"):
+            init_personal_db()
+        else:
+            init_db()
+        seed_personal_account_from_config(
+            holdings_cfg,
+            name=str(account_cfg.get("name") or "股票账户"),
+            cash=_float_cfg(account_cfg, "cash"),
+            total_assets=_float_cfg(account_cfg, "total_assets"),
+        )
+        return True
+    except Exception as exc:
+        print(f"初始化个人持仓表失败: {exc}")
+        return False
+
+
+def _load_my_holdings_config() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    holdings, account, source = _resolve_holdings_for_digest()
+    print(f"个人持仓来源: {source}（{len(holdings)} 只）")
+    return holdings, account
 
 
 def _compute_copy_plan_safe(updates: list[PortfolioUpdate] | None = None) -> dict[str, Any] | None:
     if not updates:
         return None
+    holdings, account, _ = _resolve_holdings_for_digest()
+    _prepare_personal_account_for_digest(holdings, account)
     try:
         from xueqiu.domain.personal_account import compute_copy_rebalance_plan_from_digest_updates
 

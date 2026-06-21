@@ -344,6 +344,12 @@ def init_db() -> None:
         _ensure_personal_account_schema(conn)
 
 
+def init_personal_db() -> None:
+    """仅初始化个人持仓相关表（digest 在无 MySQL 时用 sqlite 内存库）。"""
+    with engine.begin() as conn:
+        _ensure_personal_account_schema(conn)
+
+
 @contextmanager
 def get_conn() -> Iterator[Connection]:
     with engine.begin() as conn:
