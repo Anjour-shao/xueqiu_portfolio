@@ -33,6 +33,8 @@ DEEPSEEK_BASE_URL = (
     os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
     or "https://api.deepseek.com"
 )
+DEEPSEEK_PRO_MODEL = os.getenv("DEEPSEEK_PRO_MODEL", "deepseek-chat").strip()
+DEEPSEEK_FLASH_MODEL = os.getenv("DEEPSEEK_FLASH_MODEL", "deepseek-chat").strip()
 
 OSS_ACCESS_KEY_ID = os.getenv("OSS_ACCESS_KEY_ID", "").strip()
 OSS_ACCESS_KEY_SECRET = os.getenv("OSS_ACCESS_KEY_SECRET", "").strip()

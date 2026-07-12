@@ -269,6 +269,11 @@
       color: #3b82f6;
       margin-bottom: 8px;
     }
+    .user-posts-meta {
+      font-size: 11px;
+      color: #8a9199;
+      margin-bottom: 2px;
+    }
     .cookie-alert {
       background: #fff5f5;
       border: 1px solid #fecaca;
@@ -318,84 +323,6 @@
       <div class="cookie-alert-msg">{{ cookie_alert.message }}</div>
       {% endif %}
       <div class="cookie-alert-hint">{{ cookie_alert.hint }}</div>
-    </div>
-    {% endif %}
-
-    {% if account %}
-    <div class="card">
-      <div class="card-title">{{ account.name }} · 账户概览</div>
-      <div class="metrics">
-        {% if account.total_assets is not none %}
-        <div class="metric full">
-          <div class="label">总资产</div>
-          <div class="value">{{ account.total_assets_fmt }}</div>
-          {% if account.cash_fmt %}
-          <div class="sub flat">市值 {{ account.market_value_fmt }} · 现金 {{ account.cash_fmt }}</div>
-          {% else %}
-          <div class="sub flat">市值 {{ account.market_value_fmt }}</div>
-          {% endif %}
-        </div>
-        {% endif %}
-        <div class="metric">
-          <div class="label">当日盈亏</div>
-          <div class="value {{ account.daily_cls }}">{{ account.daily_pnl_fmt }}</div>
-          <div class="sub {{ account.daily_cls }}">{{ account.daily_pnl_pct_fmt }}</div>
-        </div>
-        <div class="metric">
-          <div class="label">持有盈亏</div>
-          <div class="value {{ account.holding_cls }}">{{ account.holding_pnl_fmt }}</div>
-          <div class="sub {{ account.holding_cls }}">{{ account.holding_pnl_pct_fmt }}</div>
-        </div>
-      </div>
-    </div>
-    {% endif %}
-
-    {% if holdings %}
-    <div class="card">
-      <div class="card-title">持仓明细（{{ holdings|length }} 只）</div>
-      <table class="holdings">
-        <thead>
-          <tr>
-            <th>名称</th>
-            <th class="num">现价</th>
-            <th class="num">今日</th>
-            <th class="num">持仓盈亏</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for h in holdings %}
-          <tr>
-            <td>
-              {% if h.error %}
-              <div class="stock-name">{{ h.name }}</div>
-              <div class="stock-code">{{ h.code }}</div>
-              <div class="err">{{ h.error }}</div>
-              {% else %}
-              <div class="stock-name">{{ h.name }}</div>
-              <div class="stock-code">{{ h.code }}</div>
-              <div class="stock-meta">
-                {% if h.holding_days is not none %}持股 {{ h.holding_days }} 天{% endif %}
-                {% if h.shares_fmt %} · {{ h.shares_fmt }}{% endif %}
-                {% if h.weight_fmt %} · 仓位 {{ h.weight_fmt }}{% endif %}
-              </div>
-              {% endif %}
-            </td>
-            <td class="num">{{ h.price_fmt }}</td>
-            <td class="num {{ h.change_cls }}">
-              {{ h.change_pct_fmt }}<br>
-              <span style="font-size:10px">{{ h.daily_pnl_fmt }}</span>
-            </td>
-            <td class="num {{ h.pnl_cls }}">
-              {{ h.pnl_pct_fmt }}<br>
-              <span style="font-size:10px">{{ h.pnl_amt_fmt }}</span>
-              {% if h.hfq_pnl_fmt %}
-              <br><span style="font-size:9px;color:#8a9199">后复权 {{ h.hfq_pnl_fmt }}</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
     </div>
     {% endif %}
 
@@ -456,32 +383,26 @@
     </div>
     {% endif %}
 
-    {% if copy_plan %}
+    {% if user_posts %}
     <div class="card">
-      <div class="card-title">抄作业建议仓位</div>
-      <div class="plan-strategy">{{ copy_plan.strategy_label }} · {{ copy_plan.strategy_id }}</div>
-      <div class="plan-hint">{{ copy_plan.note or "以下仅针对本次新推送的组合调仓，按策略跟单规则给出参考，非追历史仓位。" }}</div>
-      {% if copy_plan.actions %}
-      {% for item in copy_plan.actions %}
-      <div class="rb-trade">
-        <div class="rb-row compact">
-          <span class="rb-badge {{ item.badge_cls }}">{{ item.action_short }}</span>
-          <div class="rb-detail compact">
-            <span class="rb-stock">{{ item.name }}</span>
-            <span class="rb-inline">{{ item.code }}</span>
-            <span class="rb-inline">建议 {{ item.suggest_weight_fmt }} · {{ item.shares_delta }}股 · {{ item.price_fmt }} · 约{{ item.amount_fmt }}</span>
-          </div>
-        </div>
+      <div class="card-title">💬 用户观点提炼</div>
+      <div class="user-posts-meta">
+        今日 {{ user_posts.post_count }} 条发言 · AI 核心提炼
       </div>
-      {% endfor %}
+      {% if user_posts.summary_lines %}
+      <div class="rb-ai" style="margin-top:10px">
+        {% for line in user_posts.summary_lines %}
+        <p>{{ line }}</p>
+        {% endfor %}
+      </div>
       {% endif %}
     </div>
     {% endif %}
 
-  {% if not account and not holdings and not updates and not watch_summary %}
+  {% if not updates and not watch_summary and not user_posts %}
     <div class="card">
       <div class="card-title">暂无内容</div>
-      <p style="font-size:13px;color:#8a9199">今晚无持仓与调仓数据。</p>
+      <p style="font-size:13px;color:#8a9199">今晚无调仓数据与用户发言。</p>
     </div>
     {% endif %}
 

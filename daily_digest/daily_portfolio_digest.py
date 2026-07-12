@@ -25,59 +25,38 @@ from typing import Any
 # ---------------------------------------------------------------------------
 WATCH_PORTFOLIOS: list[str] = [
     "ZH3337164",
-    "ZH3365207",
     "ZH3472193",
     "ZH3558598",
     "ZH3300885",
     "ZH1236871",
     "ZH3393223",
     "ZH3483962",
-    "ZH3610939",
     "ZH3104761",
     "ZH3437281",
     "ZH3476690",
     "ZH3530915",
     "ZH3546223",
-    "ZH3585531",
     "ZH3484875",
 ]
 
 PORTFOLIO_NAMES: dict[str, str] = {
     "ZH3337164": "三年10倍",
-    "ZH3365207": "5年退休计划",
     "ZH3472193": "利润断层",
     "ZH3558598": "2026垃圾站",
     "ZH3300885": "AI概念",
     "ZH1236871": "赌出个自由",
     "ZH3393223": "血战到底",
     "ZH3483962": "投资界老萨满",
-    "ZH3610939": "友谊的大船",
     "ZH3104761": "景气组合",
     "ZH3437281": "实仓跟踪",
     "ZH3476690": "科技",
     "ZH3530915": "复利中线",
     "ZH3546223": "争取五倍",
-    "ZH3585531": "2026年十倍股",
     "ZH3484875": "钽坦",
 }
 
-# 兜底：无数据库 / 无快照时使用（正常由前端保存自动同步到 OSS 快照）
-MY_ACCOUNT: dict[str, Any] = {
-    "name": "股票账户1",
-    "cash": 27091.0,
-}
-
-# opened_at 与雪球账本一致；holding_days 可省略（按 opened_at 自动算）
-MY_HOLDINGS: list[dict[str, Any]] = [
-    {"code": "600184", "name": "光电股份", "shares": 100, "cost_price": 30.94, "opened_at": "2026-06-09"},
-    {"code": "600522", "name": "中天科技", "shares": 200, "cost_price": 25.48, "opened_at": "2026-06-04"},
-    {"code": "002466", "name": "天齐锂业", "shares": 200, "cost_price": 80.94, "opened_at": "2026-06-04"},
-    {"code": "003043", "name": "华亚智能", "shares": 300, "cost_price": 62.03, "opened_at": "2026-06-09"},
-]
-
-# 本地仍更新 MY_HOLDINGS 到 state，但钉钉不再展示个人持仓收益。
-ALWAYS_SEND_HOLDINGS = False
-RECORD_HOLDINGS_LOCALLY = True
+# 用户每日发言提炼
+DIGEST_USER_ID = "7845696728"
 
 # 评论：拉最新 N 条（约 3 页 × 20），不做「近 3 天」过滤
 COMMENT_TARGET_COUNT = 50
@@ -101,8 +80,6 @@ STATE_VERSION = 3
 ROOT = Path(__file__).resolve().parent
 BACKEND = ROOT.parent / "backend"
 STATE_FILE = Path(os.getenv("DIGEST_STATE_FILE", str(ROOT / "daily_digest_state.json")))
-HOLDINGS_SNAPSHOT_FILE = ROOT / "holdings_snapshot.json"
-OSS_HOLDINGS_SNAPSHOT_KEY = "digest/holdings_snapshot.json"
 
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
@@ -135,8 +112,6 @@ from xueqiu.config import (
     DINGTALK_KEYWORD,
     DINGTALK_WEBHOOK,
 )
-from xueqiu.domain.codes import to_xueqiu_code
-from xueqiu.integrations.sina.hfq import fetch_latest_hfq, xueqiu_to_sina
 from xueqiu.integrations.xueqiu.client import XueQiuApiClient, XueQiuApiError
 from xueqiu.integrations.xueqiu.portfolio import (
     REBALANCE_HISTORY_URL,
@@ -146,12 +121,7 @@ from xueqiu.integrations.xueqiu.portfolio import (
     validate_portfolio_id,
 )
 from xueqiu.integrations.xueqiu.auth import COOKIE_REFRESH_HINT, is_cookie_invalid_text, load_cookie
-from xueqiu.integrations.xueqiu.posts import fetch_stock_posts
-
-_SINA_SPOT_HEADERS = {
-    "Referer": "https://finance.sina.com.cn/",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-}
+from xueqiu.integrations.xueqiu.posts import fetch_stock_posts, fetch_user_timeline_page
 
 
 def _now() -> datetime:
@@ -162,38 +132,6 @@ def _now() -> datetime:
 
 def _parse_rebalance_dt(value: str) -> datetime:
     return datetime.strptime(value[:19], "%Y-%m-%d %H:%M:%S")
-
-
-@dataclass
-class AccountSummary:
-    name: str
-    total_assets: float | None
-    market_value: float
-    cash: float | None
-    daily_pnl: float
-    daily_pnl_pct: float | None
-    holding_pnl: float
-    holding_pnl_pct: float | None
-
-
-@dataclass
-class HoldingQuote:
-    code: str
-    name: str
-    price: float | None
-    change_pct: float | None
-    cost_price: float | None = None
-    shares: float | None = None
-    market_value: float | None = None
-    daily_pnl_amount: float | None = None
-    unrealized_pnl_pct: float | None = None
-    unrealized_pnl_amount: float | None = None
-    hfq_price: float | None = None
-    hfq_cost: float | None = None
-    hfq_pnl_pct: float | None = None
-    holding_days: int | None = None
-    weight_pct: float | None = None
-    error: str = ""
 
 
 @dataclass
@@ -210,27 +148,19 @@ class PortfolioUpdate:
     batches: list[RebalanceBatchDigest]
 
 
-def normalize_stock_code(raw: str) -> str:
-    code = str(raw or "").strip().upper()
-    if not code:
-        raise ValueError("空股票代码")
-    if len(code) >= 8 and code[:2] in {"SH", "SZ", "BJ"}:
-        return code
-    digits = code.split(".")[0]
-    if digits.isdigit() and len(digits) == 6:
-        if digits.startswith(("5", "6", "9")):
-            return f"SH{digits}"
-        return f"SZ{digits}"
-    return to_xueqiu_code(code)
+@dataclass
+class UserPostsDigest:
+    """用户当日发言提炼结果。"""
+    post_count: int
+    summary: str  # AI 提炼的核心观点文本
+    raw_text: str = ""  # 原始帖子文本（供调试）
 
 
 def _empty_state() -> dict[str, Any]:
     return {
         "version": STATE_VERSION,
         "last_digest_at": None,
-        "account": {"name": MY_ACCOUNT.get("name", "股票账户"), "last_total_assets": None},
         "portfolios": {},
-        "holdings": {},
     }
 
 
@@ -246,7 +176,7 @@ def load_state() -> dict[str, Any]:
     if not isinstance(raw, dict):
         return _empty_state()
 
-    # 兼容 v1 / v2
+    # 兼容旧版本 state
     ver = raw.get("version")
     if ver != STATE_VERSION:
         migrated = _empty_state()
@@ -259,18 +189,12 @@ def load_state() -> dict[str, Any]:
                     migrated["portfolios"][str(key)] = {"last_notified_rebalance_time": val}
                 elif str(key).startswith("ZH") and isinstance(val, dict):
                     migrated["portfolios"][str(key)] = dict(val)
-        migrated["holdings"] = dict(raw.get("holdings") or {})
-        if isinstance(raw.get("account"), dict):
-            migrated["account"].update(raw["account"])
         print(f"已将 state 从 v{ver} 迁移到 v{STATE_VERSION}。")
         return migrated
 
     state = _empty_state()
     state["last_digest_at"] = raw.get("last_digest_at")
     state["portfolios"] = dict(raw.get("portfolios") or {})
-    state["holdings"] = dict(raw.get("holdings") or {})
-    if isinstance(raw.get("account"), dict):
-        state["account"] = {**state["account"], **raw["account"]}
     return state
 
 
@@ -463,403 +387,6 @@ def fetch_rebalances_since(
     return found
 
 
-def _code_to_sinajs_symbol(code: str) -> str:
-    digits, market = xueqiu_to_sina(code)
-    return f"{market}{digits}"
-
-
-def _parse_sinajs_line(line: str) -> tuple[float | None, float | None]:
-    eq = line.find("=")
-    if eq < 0:
-        return None, None
-    payload = line[eq + 1 :].strip().strip('";')
-    if not payload or payload == '""':
-        return None, None
-    parts = payload.split(",")
-    if len(parts) < 4:
-        return None, None
-    try:
-        pre_close = float(parts[2])
-        current = float(parts[3])
-    except ValueError:
-        return None, None
-    if pre_close <= 0 or current <= 0:
-        return None, None
-    return current, pre_close
-
-
-def _float_cfg(item: dict[str, Any], key: str) -> float | None:
-    raw = item.get(key)
-    if raw is None or raw == "":
-        return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
-
-
-def _int_cfg(item: dict[str, Any], key: str) -> int | None:
-    raw = item.get(key)
-    if raw is None or raw == "":
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
-
-
-def _resolve_holding_days(
-    item: dict[str, Any],
-    code: str,
-    state: dict[str, Any],
-) -> int | None:
-    days = _int_cfg(item, "holding_days")
-    if days is not None and days >= 0:
-        return days
-    opened = str(item.get("opened_at") or "").strip()
-    if opened:
-        try:
-            opened_date = datetime.strptime(opened[:10], "%Y-%m-%d").date()
-            return max(0, (_now().date() - opened_date).days)
-        except ValueError:
-            pass
-    hist = (state.get("holdings") or {}).get(code) or {}
-    return _int_cfg(hist, "holding_days")
-
-
-def _apply_holding_weights(quotes: list[HoldingQuote]) -> None:
-    total_mv = sum(q.market_value or 0.0 for q in quotes if q.market_value)
-    if total_mv <= 0:
-        return
-    for q in quotes:
-        if q.market_value is not None and q.weight_pct is None:
-            q.weight_pct = round(q.market_value / total_mv * 100, 2)
-
-
-def fetch_holding_quotes(
-    holdings: list[dict[str, Any]],
-    *,
-    state: dict[str, Any] | None = None,
-) -> list[HoldingQuote]:
-    if not holdings:
-        return []
-
-    state = state or {}
-    results: list[HoldingQuote] = []
-    entries: list[tuple[str, str, str, float | None, float | None, int | None, float | None]] = []
-    for item in holdings:
-        raw_code = str(item.get("code", "")).strip()
-        name = str(item.get("name", raw_code)).strip()
-        cost = _float_cfg(item, "cost_price")
-        shares = _float_cfg(item, "shares")
-        weight_pct = _float_cfg(item, "weight_pct")
-        if not raw_code:
-            continue
-        try:
-            code = normalize_stock_code(raw_code)
-            holding_days = _resolve_holding_days(item, code, state)
-            entries.append(
-                (code, name, _code_to_sinajs_symbol(code), cost, shares, holding_days, weight_pct)
-            )
-        except ValueError as exc:
-            print(f"      跳过无效持仓代码 {raw_code}: {exc}")
-            results.append(
-                HoldingQuote(
-                    code=raw_code.upper(),
-                    name=name,
-                    price=None,
-                    change_pct=None,
-                    cost_price=cost,
-                    shares=shares,
-                    error=str(exc),
-                )
-            )
-
-    if not entries:
-        return results
-
-    symbols = [e[2] for e in entries]
-    quotes_by_symbol: dict[str, tuple[float | None, float | None]] = {}
-    url = "http://hq.sinajs.cn/list=" + ",".join(symbols)
-    try:
-        resp = requests.get(url, headers=_SINA_SPOT_HEADERS, timeout=15)
-        resp.encoding = "gbk"
-        resp.raise_for_status()
-        for line in resp.text.splitlines():
-            line = line.strip()
-            if not line or "=" not in line:
-                continue
-            var_name = line.split("=", 1)[0]
-            sym = var_name.replace("var hq_str_", "")
-            quotes_by_symbol[sym] = _parse_sinajs_line(line)
-    except Exception as exc:
-        print(f"      新浪行情请求失败: {exc}")
-        for code, name, _, cost, shares, hd, wp in entries:
-            results.append(
-                HoldingQuote(
-                    code=code,
-                    name=name,
-                    price=None,
-                    change_pct=None,
-                    cost_price=cost,
-                    shares=shares,
-                    holding_days=hd,
-                    weight_pct=wp,
-                    error=str(exc),
-                )
-            )
-        return results
-
-    for code, name, sina_sym, cost, shares, holding_days, weight_pct in entries:
-        current, pre_close = quotes_by_symbol.get(sina_sym, (None, None))
-        if current is None or pre_close is None:
-            results.append(
-                HoldingQuote(
-                    code=code,
-                    name=name,
-                    price=None,
-                    change_pct=None,
-                    cost_price=cost,
-                    shares=shares,
-                    holding_days=holding_days,
-                    weight_pct=weight_pct,
-                    error="无行情数据",
-                )
-            )
-            continue
-        change_pct = round((current - pre_close) / pre_close * 100, 2)
-        daily_amt = round((current - pre_close) * shares, 2) if shares and shares > 0 else None
-        mkt = round(current * shares, 2) if shares and shares > 0 else None
-        pnl_pct = None
-        pnl_amt = None
-        hfq_price = None
-        hfq_cost = None
-        hfq_pnl_pct = None
-        if cost and cost > 0:
-            pnl_pct = round((current - cost) / cost * 100, 2)
-            if shares and shares > 0:
-                pnl_amt = round((current - cost) * shares, 2)
-        try:
-            _, hfq_close = fetch_latest_hfq(code)
-            hfq_price = hfq_close
-            if cost and cost > 0 and current > 0:
-                hfq_cost = cost * (hfq_close / current)
-                hfq_pnl_pct = round((hfq_close - hfq_cost) / hfq_cost * 100, 2)
-        except Exception:
-            pass
-        results.append(
-            HoldingQuote(
-                code=code,
-                name=name,
-                price=current,
-                change_pct=change_pct,
-                cost_price=cost,
-                shares=shares,
-                market_value=mkt,
-                daily_pnl_amount=daily_amt,
-                unrealized_pnl_pct=pnl_pct,
-                unrealized_pnl_amount=pnl_amt,
-                hfq_price=hfq_price,
-                hfq_cost=hfq_cost,
-                hfq_pnl_pct=hfq_pnl_pct,
-                holding_days=holding_days,
-                weight_pct=weight_pct,
-            )
-        )
-    _apply_holding_weights(results)
-    return results
-
-
-def build_account_summary(
-    quotes: list[HoldingQuote],
-    state: dict[str, Any],
-) -> AccountSummary:
-    name = str(MY_ACCOUNT.get("name") or state.get("account", {}).get("name") or "股票账户")
-    market_value = sum(q.market_value or 0.0 for q in quotes)
-    daily_pnl = sum(q.daily_pnl_amount or 0.0 for q in quotes)
-    holding_pnl = sum(q.unrealized_pnl_amount or 0.0 for q in quotes)
-
-    cfg_assets = _float_cfg(MY_ACCOUNT, "total_assets")
-    cash_cfg = _float_cfg(MY_ACCOUNT, "cash")
-    if cash_cfg is not None:
-        cash = cash_cfg
-        total_assets = market_value + cash
-    elif cfg_assets is not None and cfg_assets >= market_value:
-        cash = round(cfg_assets - market_value, 2)
-        total_assets = cfg_assets
-    else:
-        cash = None
-        total_assets = market_value if market_value > 0 else cfg_assets
-
-    # 当日收益率：相对「昨日总资产」≈ 今日总资产 − 当日盈亏（与雪球 +1.91% 口径一致）
-    # 不用 last_total_assets 对比：MY_ACCOUNT.total_assets 是手填静态值，与 state 相同会得到 0%
-    daily_pnl_pct = None
-    if total_assets is not None:
-        prev_total = float(total_assets) - daily_pnl
-        if prev_total > 0:
-            daily_pnl_pct = round(daily_pnl / prev_total * 100, 2)
-    elif market_value > daily_pnl:
-        daily_pnl_pct = round(daily_pnl / (market_value - daily_pnl) * 100, 2)
-
-    cost_basis = sum((q.cost_price or 0) * (q.shares or 0) for q in quotes if q.cost_price)
-    holding_pnl_pct = None
-    if cost_basis > 0:
-        holding_pnl_pct = round(holding_pnl / cost_basis * 100, 2)
-
-    return AccountSummary(
-        name=name,
-        total_assets=total_assets,
-        market_value=round(market_value, 2),
-        cash=cash,
-        daily_pnl=round(daily_pnl, 2),
-        daily_pnl_pct=daily_pnl_pct,
-        holding_pnl=round(holding_pnl, 2),
-        holding_pnl_pct=holding_pnl_pct,
-    )
-
-
-def update_holdings_state(
-    state: dict[str, Any],
-    quotes: list[HoldingQuote],
-    account: AccountSummary,
-) -> None:
-    state.setdefault("holdings", {})
-    state.setdefault("account", {})
-    for q in quotes:
-        if q.price is None:
-            continue
-        state["holdings"][q.code] = {
-            "name": q.name,
-            "cost_price": q.cost_price,
-            "shares": q.shares,
-            "last_price": q.price,
-            "last_change_pct": q.change_pct,
-            "daily_pnl_amount": q.daily_pnl_amount,
-            "market_value": q.market_value,
-            "unrealized_pnl_pct": q.unrealized_pnl_pct,
-            "unrealized_pnl_amount": q.unrealized_pnl_amount,
-            "hfq_price": q.hfq_price,
-            "hfq_cost": q.hfq_cost,
-            "hfq_pnl_pct": q.hfq_pnl_pct,
-            "holding_days": q.holding_days,
-            "weight_pct": q.weight_pct,
-            "updated_at": _now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-    if account.total_assets is not None:
-        state["account"]["last_total_assets"] = account.total_assets
-    state["account"]["name"] = account.name
-    state["account"]["last_snapshot"] = {
-        "at": _now().strftime("%Y-%m-%d %H:%M:%S"),
-        "market_value": account.market_value,
-        "daily_pnl": account.daily_pnl,
-        "daily_pnl_pct": account.daily_pnl_pct,
-        "holding_pnl": account.holding_pnl,
-        "holding_pnl_pct": account.holding_pnl_pct,
-    }
-
-
-def _fmt_pct(pct: float | None) -> str:
-    if pct is None:
-        return "-"
-    sign = "+" if pct > 0 else ""
-    return f"{sign}{pct:.2f}%"
-
-
-def _fmt_money(amount: float | None) -> str:
-    if amount is None:
-        return "-"
-    sign = "+" if amount > 0 else ""
-    return f"{sign}{amount:,.2f}"
-
-
-def _fmt_money_plain(amount: float | None) -> str:
-    if amount is None:
-        return "-"
-    return f"{amount:,.2f}"
-
-
-def _trend_tag(pct: float | None) -> str:
-    if pct is None:
-        return "·"
-    if pct > 0:
-        return "涨"
-    if pct < 0:
-        return "跌"
-    return "平"
-
-
-def _holdings_markdown(quotes: list[HoldingQuote], account: AccountSummary) -> str:
-    if not quotes:
-        return ""
-
-    lines = [
-        f"### 💼 {account.name}",
-        "",
-        "#### 账户概览",
-        "",
-    ]
-    if account.total_assets is not None:
-        d_pct = _fmt_pct(account.daily_pnl_pct) if account.daily_pnl_pct is not None else "-"
-        h_pct = _fmt_pct(account.holding_pnl_pct) if account.holding_pnl_pct is not None else "-"
-        overview = [
-            f"- 总资产 **{_fmt_money_plain(account.total_assets)}**",
-            f"- 市值 **{_fmt_money_plain(account.market_value)}**",
-        ]
-        if account.cash is not None:
-            overview.append(f"- 现金 **{_fmt_money_plain(account.cash)}**")
-        overview.extend(
-            [
-                f"- 当日盈亏 **{_fmt_money(account.daily_pnl)}**（{d_pct}）",
-                f"- 持有盈亏 **{_fmt_money(account.holding_pnl)}**（{h_pct}）",
-                "",
-            ]
-        )
-        lines.extend(overview)
-
-    sorted_quotes = sorted(
-        quotes,
-        key=lambda q: (q.weight_pct is None, -(q.weight_pct or 0)),
-    )
-    lines.append(f"#### 持仓明细（{len(sorted_quotes)} 只）")
-    lines.append("")
-
-    for idx, q in enumerate(sorted_quotes, 1):
-        if q.error:
-            lines.append(f"**{idx}. {q.name}** `{q.code}`  \n{q.error}")
-            lines.append("")
-            continue
-
-        meta_parts: list[str] = []
-        if q.holding_days is not None:
-            meta_parts.append(f"持股 **{q.holding_days}** 天")
-        if q.shares:
-            meta_parts.append(f"**{int(q.shares)}** 股")
-        if q.weight_pct is not None:
-            meta_parts.append(f"仓位 **{q.weight_pct:.1f}%**")
-        meta_line = " · ".join(meta_parts) if meta_parts else ""
-
-        price_str = f"{q.price:.2f}" if q.price is not None else "-"
-        day_line = f"今日 {_trend_tag(q.change_pct)} **{_fmt_pct(q.change_pct)}**"
-        if q.daily_pnl_amount is not None:
-            day_line += f"（{_fmt_money(q.daily_pnl_amount)}）"
-
-        lines.append(f"**{idx}. {q.name}** `{q.code}`")
-        if meta_line:
-            lines.append(f"> {meta_line}")
-        lines.append(f"> 现价 **{price_str}** · {day_line}")
-
-        if q.unrealized_pnl_pct is not None:
-            pnl_line = f"> 持仓盈亏 **{_fmt_pct(q.unrealized_pnl_pct)}**"
-            if q.unrealized_pnl_amount is not None:
-                pnl_line += f"（{_fmt_money(q.unrealized_pnl_amount)}）"
-            if q.hfq_pnl_pct is not None:
-                pnl_line += f" · 后复权 {_fmt_pct(q.hfq_pnl_pct)}"
-            lines.append(pnl_line)
-        lines.append("")
-
-    return "\n".join(lines)
-
-
 def _truncate_ai_text(text: str, limit: int = 1400) -> str:
     from digest.render import _truncate
 
@@ -1007,135 +534,110 @@ def _build_watch_summary(updates: list[PortfolioUpdate]) -> dict[str, Any] | Non
     }
 
 
-def _snapshot_to_config(snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    account_raw = snapshot.get("account") if isinstance(snapshot.get("account"), dict) else {}
-    account_cfg: dict[str, Any] = {
-        "name": str(account_raw.get("name") or MY_ACCOUNT.get("name") or "股票账户"),
-        "cash": float(account_raw.get("cash") or 0),
-    }
-    if account_raw.get("strategy_id"):
-        account_cfg["strategy_id"] = str(account_raw["strategy_id"])
-    holdings = [dict(h) for h in (snapshot.get("holdings") or []) if isinstance(h, dict)]
-    return holdings, account_cfg
+def fetch_today_user_posts(
+    client: XueQiuApiClient,
+    user_id: str,
+    *,
+    max_pages: int = 5,
+) -> list[dict[str, Any]]:
+    """逐页抓取用户 timeline，按 created_at 过滤当天帖子。
+    遇到日期 < 今天即停止（避免置顶帖等旧帖混入）。
+    """
+    today = _now().strftime("%Y-%m-%d")
+    today_posts: list[dict[str, Any]] = []
+
+    for page in range(1, max_pages + 1):
+        try:
+            posts, has_more = fetch_user_timeline_page(
+                client, user_id, page=page, count=20
+            )
+        except Exception as exc:
+            print(f"      用户帖子第 {page} 页获取失败: {exc}")
+            break
+
+        if not posts:
+            print(f"      用户帖子第 {page} 页无数据，停止翻页。")
+            break
+
+        for p in posts:
+            post_date = (p.created_at or "")[:10]
+            if post_date == today:
+                today_posts.append({
+                    "id": p.id,
+                    "text": p.text,
+                    "created_at": p.created_at,
+                    "like_count": p.like_count,
+                    "reply_count": p.reply_count,
+                    "retweet_count": p.retweet_count,
+                })
+            elif post_date and post_date < today:
+                # 已翻到昨天的帖，停止
+                print(f"      用户帖子已翻到 {post_date}（< 今天），停止翻页。")
+                return today_posts
+
+        if not has_more:
+            break
+        if page < max_pages:
+            time.sleep(random.uniform(0.5, 1.0))
+
+    return today_posts
 
 
-def _fetch_holdings_snapshot_from_oss() -> dict[str, Any] | None:
+def call_deepseek_summarize_user_posts(posts: list[dict[str, Any]], *, verbose: bool = False) -> str:
+    """用 DeepSeek 提炼用户当日发言的核心投资观点。"""
+    if not posts:
+        return ""
+
+    client = _deepseek_client()
+    if client is None:
+        return "未配置 DEEPSEEK_API_KEY，跳过用户发言提炼。"
+
+    # 拼接当日帖子文本
+    items = []
+    for idx, p in enumerate(posts, 1):
+        text = (p.get("text") or "").replace("\n", " ")
+        if len(text) > 400:
+            text = text[:400] + "…"
+        items.append(f"[{idx}] {text}")
+    posts_text = "\n\n".join(items)
+
+    if verbose:
+        key_hint = f"{DEEPSEEK_API_KEY[:8]}…" if len(DEEPSEEK_API_KEY) > 8 else "(空)"
+        print(f"      >>> 调用 DeepSeek 提炼用户发言（base={DEEPSEEK_BASE_URL}, key={key_hint}）")
+
+    prompt = f"""
+你是一个专业的投资信息提炼助手。以下是某位雪球用户今日的全部发言，请提炼核心内容。
+
+输出要求：
+1. 直接从【核心观点】、【关注个股/板块】、【宏观判断】三个小标题开始，不要任何开场白。
+2. 提取每一条中涉及的投资判断、产业逻辑、仓位变动暗示；过滤纯情绪发泄或日常寒暄。
+3. 每个维度 2-5 条要点，总字数 300-500 字。
+4. 观点之间用空行分隔，每条一句话即可。
+
+今日发言原始数据：
+{posts_text}
+"""
     try:
-        from xueqiu.config import OSS_CUSTOM_DOMAIN, OSS_BUCKET_NAME, OSS_ENDPOINT
-
-        if OSS_CUSTOM_DOMAIN:
-            url = f"{OSS_CUSTOM_DOMAIN.rstrip('/')}/{OSS_HOLDINGS_SNAPSHOT_KEY}"
-        elif OSS_BUCKET_NAME and OSS_ENDPOINT:
-            url = f"https://{OSS_BUCKET_NAME}.{OSS_ENDPOINT}/{OSS_HOLDINGS_SNAPSHOT_KEY}"
-        else:
-            return None
-        resp = requests.get(url, timeout=20)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        return data if isinstance(data, dict) else None
-    except Exception as exc:
-        print(f"从 OSS 读取持仓快照失败: {exc}")
-        return None
-
-
-def _load_holdings_snapshot_local() -> dict[str, Any] | None:
-    if not HOLDINGS_SNAPSHOT_FILE.exists():
-        return None
-    try:
-        data = json.loads(HOLDINGS_SNAPSHOT_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except (json.JSONDecodeError, OSError) as exc:
-        print(f"读取本地持仓快照失败: {exc}")
-        return None
-
-
-def _resolve_holdings_for_digest() -> tuple[list[dict[str, Any]], dict[str, Any], str]:
-    """持仓来源：本地 MySQL → OSS/本地快照 → 脚本兜底。"""
-    try:
-        from xueqiu.config import DATABASE_URL
-        from xueqiu.domain.personal_account import account_meta_for_digest, holdings_for_digest
-        from xueqiu.storage.db import init_db
-
-        if not str(DATABASE_URL).startswith("sqlite"):
-            init_db()
-            db_holdings = holdings_for_digest()
-            if db_holdings:
-                meta = account_meta_for_digest()
-                account_cfg = dict(MY_ACCOUNT)
-                account_cfg["name"] = meta.get("name") or account_cfg.get("name")
-                if meta.get("cash") is not None:
-                    account_cfg["cash"] = meta["cash"]
-                return db_holdings, account_cfg, "database"
-    except Exception as exc:
-        print(f"读取数据库个人持仓失败: {exc}")
-
-    snapshot = _fetch_holdings_snapshot_from_oss()
-    snapshot_source = "oss_snapshot"
-    if not snapshot or not snapshot.get("holdings"):
-        snapshot = _load_holdings_snapshot_local()
-        snapshot_source = "local_snapshot"
-    if snapshot and snapshot.get("holdings"):
-        holdings, account_cfg = _snapshot_to_config(snapshot)
-        return holdings, account_cfg, snapshot_source
-
-    return list(MY_HOLDINGS), dict(MY_ACCOUNT), "script_fallback"
-
-
-def _prepare_personal_account_for_digest(
-    holdings: list[dict[str, Any]] | None = None,
-    account: dict[str, Any] | None = None,
-) -> bool:
-    """GHA 等无 MySQL 场景：用快照/脚本持仓灌 sqlite，供抄作业方案计算。"""
-    holdings_cfg = holdings if holdings is not None else list(MY_HOLDINGS)
-    account_cfg = account if account is not None else dict(MY_ACCOUNT)
-    if not holdings_cfg:
-        return False
-    try:
-        from xueqiu.config import DATABASE_URL
-        from xueqiu.domain.personal_account import seed_personal_account_from_config
-        from xueqiu.storage.db import init_db, init_personal_db
-
-        if str(DATABASE_URL).startswith("sqlite"):
-            init_personal_db()
-        else:
-            init_db()
-        seed_personal_account_from_config(
-            holdings_cfg,
-            name=str(account_cfg.get("name") or "股票账户"),
-            cash=_float_cfg(account_cfg, "cash"),
-            total_assets=_float_cfg(account_cfg, "total_assets"),
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是专业的投资信息提炼助手。禁止开场白，直接输出三个维度要点。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
         )
-        return True
+        content = response.choices[0].message.content
+        summary = (content or "").strip()
+        if verbose:
+            preview = summary.replace("\n", " ")[:120]
+            print(f"      <<< DeepSeek 返回 {len(summary)} 字: {preview}…")
+        return summary
     except Exception as exc:
-        print(f"初始化个人持仓表失败: {exc}")
-        return False
-
-
-def _load_my_holdings_config() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    holdings, account, source = _resolve_holdings_for_digest()
-    print(f"个人持仓来源: {source}（{len(holdings)} 只）")
-    return holdings, account
-
-
-def _compute_copy_plan_safe(updates: list[PortfolioUpdate] | None = None) -> dict[str, Any] | None:
-    if not updates:
-        return None
-    holdings, account, _ = _resolve_holdings_for_digest()
-    _prepare_personal_account_for_digest(holdings, account)
-    try:
-        from xueqiu.domain.personal_account import compute_copy_rebalance_plan_from_digest_updates
-
-        plan = compute_copy_rebalance_plan_from_digest_updates(updates)
-        if plan.get("actions"):
-            print(f"抄作业调仓方案: {len(plan['actions'])} 笔（{plan.get('strategy_label')}，仅本次新调仓）")
-            return plan
-        if plan.get("note"):
-            print(f"抄作业调仓: {plan['note']}")
-            return plan
-    except Exception as exc:
-        print(f"抄作业调仓方案计算失败: {exc}")
-    return None
+        print(f"      用户发言提炼失败: {exc}")
+        return f"AI 提炼异常: {exc}"
 
 
 def _probe_xueqiu_cookie() -> dict[str, Any]:
@@ -1168,13 +670,10 @@ def _cookie_alert_payload(message: str) -> dict[str, str]:
 def send_dingtalk_digest(
     *,
     run_time: str,
-    account: AccountSummary | None = None,
-    quotes: list[HoldingQuote] | None = None,
     updates: list[PortfolioUpdate] | None = None,
     force_markdown: bool = False,
-    include_holdings: bool = False,
-    copy_plan: dict[str, Any] | None = None,
     cookie_alert: dict[str, str] | None = None,
+    user_posts: UserPostsDigest | None = None,
 ) -> None:
     """推送简报：默认 HTML 渲染为图片；失败时回退 Markdown。"""
     from digest import render as digest_render
@@ -1184,6 +683,8 @@ def send_dingtalk_digest(
     title = _digest_push_title(updates)
     if cookie_alert and not updates:
         title = "Cookie 过期 · 请更新"
+    if user_posts and user_posts.post_count > 0:
+        title += " · 用户观点"
     simulate_note = f"模拟 {TEST_SIMULATE_NOW}" if TEST_SIMULATE_NOW else ""
     push_mode = digest_render.DIGEST_PUSH_MODE or "image"
 
@@ -1192,12 +693,10 @@ def send_dingtalk_digest(
             ok, local_path = digest_render.push_digest_image(
                 run_time=run_time,
                 simulate_note=simulate_note,
-                account=account if include_holdings else None,
-                quotes=quotes if include_holdings else None,
                 updates=updates,
                 watch_summary=watch_summary,
-                copy_plan=copy_plan,
                 cookie_alert=cookie_alert,
+                user_posts=user_posts,
                 title=title,
             )
             if ok and push_mode == "image":
@@ -1209,10 +708,6 @@ def send_dingtalk_digest(
                 print("      建议在 .env 配置 OSS 或 IMG_BB_API_KEY 后重试（见 daily_digest/README.md）")
         except Exception as exc:
             print(f"      图片简报失败，回退 Markdown: {exc}")
-
-    holdings_md = ""
-    if include_holdings and quotes and account:
-        holdings_md = _holdings_markdown(quotes, account)
 
     mode = f" · 模拟 {TEST_SIMULATE_NOW}" if TEST_SIMULATE_NOW else ""
     md_parts = [
@@ -1234,20 +729,13 @@ def send_dingtalk_digest(
                 "",
             ]
         )
-    if holdings_md:
-        md_parts.append(holdings_md.rstrip())
-        md_parts.append("")
     if updates:
-        md_parts.append("---")
-        md_parts.append("")
         md_parts.append("### 🔔 组合调仓")
         md_parts.append("")
         for upd in updates:
             md_parts.append(_portfolio_update_markdown(upd).rstrip())
             md_parts.append("")
     elif watch_summary:
-        md_parts.append("---")
-        md_parts.append("")
         md_parts.append("### 🔔 组合调仓")
         md_parts.append("")
         if watch_summary["new_count"] == 0:
@@ -1255,8 +743,18 @@ def send_dingtalk_digest(
                 f"今晚无新调仓（已巡检 {watch_summary['count']} 个关注组合）。"
             )
         md_parts.append("")
-    elif not holdings_md:
-        md_parts.append("今晚无持仓配置且无待推送的调仓。")
+    # 用户发言提炼
+    if user_posts and user_posts.summary:
+        md_parts.append("---")
+        md_parts.append("")
+        md_parts.append("### 💬 用户观点提炼")
+        md_parts.append("")
+        md_parts.append(f"> 今日 {user_posts.post_count} 条发言 · AI 核心提炼")
+        md_parts.append("")
+        md_parts.append(user_posts.summary)
+        md_parts.append("")
+    if not updates and not (watch_summary and watch_summary["new_count"] == 0) and not user_posts:
+        md_parts.append("今晚无新调仓。")
 
     send_dingtalk_markdown(title, "\n".join(md_parts).rstrip() + "\n")
 
@@ -1373,31 +871,6 @@ def check_portfolio_for_nightly_digest(
     )
 
 
-def run_holdings_only(*, force_markdown: bool = False) -> None:
-    """仅推送个人持仓行情，不扫组合、不调 DeepSeek。"""
-    run_time = _now().strftime("%Y-%m-%d %H:%M")
-    print(f"=== 仅持仓简报 ({run_time}) ===")
-    holdings_cfg, account_cfg = _load_my_holdings_config()
-    MY_ACCOUNT.update(account_cfg)
-    if not holdings_cfg:
-        print("未配置持仓。")
-        return
-    state = load_state()
-    quotes = fetch_holding_quotes(holdings_cfg, state=state)
-    account_summary = build_account_summary(quotes, state)
-    update_holdings_state(state, quotes, account_summary)
-    save_state(state)
-    send_dingtalk_digest(
-        run_time=run_time,
-        account=account_summary,
-        quotes=quotes,
-        updates=[],
-        force_markdown=force_markdown,
-        include_holdings=True,
-    )
-    print("=== 执行完毕 ===")
-
-
 def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None:
     run_time = _now().strftime("%Y-%m-%d %H:%M")
     sim_note = f" [模拟时间，TEST_SIMULATE_NOW={TEST_SIMULATE_NOW}]" if TEST_SIMULATE_NOW else ""
@@ -1407,19 +880,15 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
     base_url = (DEEPSEEK_BASE_URL or "https://api.deepseek.com").strip()
     print(f"DeepSeek: {base_url}")
 
-    holdings_cfg, account_cfg = _load_my_holdings_config()
-    MY_ACCOUNT.update(account_cfg)
-
-    if not WATCH_PORTFOLIOS and not holdings_cfg:
-        print("请在脚本顶部配置 WATCH_PORTFOLIOS 或在前端维护个人持仓。")
+    if not WATCH_PORTFOLIOS:
+        print("请在脚本顶部配置 WATCH_PORTFOLIOS。")
         return
 
     state = load_state()
     updates: list[PortfolioUpdate] = []
     ai_budget = [MAX_AI_CALLS_PER_RUN]
-    quotes: list[HoldingQuote] | None = None
-    account_summary: AccountSummary | None = None
     cookie_alert: dict[str, str] | None = None
+    user_posts: UserPostsDigest | None = None
 
     cookie_probe = _probe_xueqiu_cookie()
     if not cookie_probe.get("ok"):
@@ -1449,38 +918,40 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
             if ai_budget[0] < MAX_AI_CALLS_PER_RUN:
                 used = MAX_AI_CALLS_PER_RUN - ai_budget[0]
                 print(f"\n本 run 已调用 DeepSeek {used} 次（上限 {MAX_AI_CALLS_PER_RUN}）。")
+
+            # 用户每日发言提炼（复用同一个 client）
+            if DIGEST_USER_ID:
+                print(f"\n抓取用户 {DIGEST_USER_ID} 今日发言…")
+                today_posts = fetch_today_user_posts(client, DIGEST_USER_ID)
+                print(f"  用户 {DIGEST_USER_ID} 今日 {len(today_posts)} 条帖子。")
+                if today_posts:
+                    summary = call_deepseek_summarize_user_posts(today_posts, verbose=True)
+                    user_posts = UserPostsDigest(
+                        post_count=len(today_posts),
+                        summary=summary,
+                    )
+                    print(f"  用户发言 AI 提炼完成。")
+            else:
+                print("未配置 DIGEST_USER_ID，跳过用户发言提炼。")
+
         elif skip_portfolios:
-            print("已跳过组合调仓巡检（--holdings-only）。")
+            print("已跳过组合调仓巡检（--skip-portfolios）。")
         elif cookie_alert:
             print("Cookie 无效，已跳过组合调仓巡检。")
 
         state["last_digest_at"] = run_time
 
-        if holdings_cfg and RECORD_HOLDINGS_LOCALLY:
-            print("\n拉取个人持仓行情并仅写入本地 state（钉钉不展示持仓收益）…")
-            quotes = fetch_holding_quotes(holdings_cfg, state=state)
-            account_summary = build_account_summary(quotes, state)
-            update_holdings_state(state, quotes, account_summary)
-
-        copy_plan: dict[str, Any] | None = None
-        if updates:
-            print("\n计算抄作业调仓方案（仅本次新调仓）…")
-            copy_plan = _compute_copy_plan_safe(updates)
-
-        should_send = bool(updates) or bool(cookie_alert)
+        should_send = bool(updates) or bool(cookie_alert) or (user_posts and user_posts.post_count > 0)
         if should_send:
             send_dingtalk_digest(
                 run_time=run_time,
-                account=account_summary,
-                quotes=quotes,
                 updates=updates,
                 force_markdown=force_markdown,
-                include_holdings=False,
-                copy_plan=copy_plan,
                 cookie_alert=cookie_alert,
+                user_posts=user_posts,
             )
         else:
-            print("关注组合无新调仓，已更新本地持仓记录但不发送钉钉。")
+            print("关注组合无新调仓，今日无用户发言。")
     finally:
         try:
             save_state(state)
@@ -1498,11 +969,6 @@ if __name__ == "__main__":
         help="仅同步各组合最新调仓时间到 state，不推送",
     )
     parser.add_argument(
-        "--holdings-only",
-        action="store_true",
-        help="仅推送个人持仓，不扫组合、不调 AI",
-    )
-    parser.add_argument(
         "--push-markdown",
         action="store_true",
         help="强制 Markdown 文本推送（默认 HTML 渲染为图片）",
@@ -1510,7 +976,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.init_state:
         init_portfolio_state_only()
-    elif args.holdings_only:
-        run_holdings_only(force_markdown=args.push_markdown)
     else:
         main(skip_portfolios=False, force_markdown=args.push_markdown)

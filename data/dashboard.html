@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>雪球观点回测 - 直到一万点</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Microsoft YaHei", sans-serif; background: #0f172a; color: #e2e8f0; }
+.header { background: linear-gradient(135deg, #1e293b, #0f172a); padding: 24px 32px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
+.header h1 { font-size: 24px; color: #f8fafc; }
+.header .sub { color: #94a3b8; font-size: 14px; margin-top: 4px; }
+.filters { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.filters select, .filters input { padding: 8px 12px; border-radius: 8px; border: 1px solid #475569; background: #1e293b; color: #e2e8f0; font-size: 13px; outline: none; }
+.filters select:focus, .filters input:focus { border-color: #6366f1; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; padding: 24px 32px; }
+.card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
+.card .label { color: #94a3b8; font-size: 13px; margin-bottom: 8px; }
+.card .value { font-size: 28px; font-weight: 700; color: #f8fafc; }
+.card .value.positive { color: #22c55e; }
+.card .value.negative { color: #ef4444; }
+.chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 32px 24px; }
+@media (max-width: 900px) { .chart-grid { grid-template-columns: 1fr; } }
+.chart-box { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
+.chart-box h3 { font-size: 16px; margin-bottom: 12px; color: #cbd5e1; }
+.chart { width: 100%; height: 400px; }
+.table-box { padding: 0 32px 24px; }
+.table-box h3 { font-size: 16px; margin-bottom: 12px; color: #cbd5e1; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 10px 12px; background: #1e293b; color: #94a3b8; font-weight: 500; border-bottom: 2px solid #334155; position: sticky; top: 0; cursor: pointer; user-select: none; }
+th:hover { color: #f8fafc; }
+td { padding: 8px 12px; border-bottom: 1px solid #1e293b; }
+tr:hover td { background: #1e293b; }
+.positive { color: #22c55e; }
+.negative { color: #ef4444; }
+.win-high { color: #22c55e; font-weight: 600; }
+.win-mid { color: #eab308; }
+.win-low { color: #ef4444; }
+.table-wrap { max-height: 600px; overflow-y: auto; border-radius: 12px; border: 1px solid #334155; }
+.stock-link { color: #818cf8; cursor: pointer; text-decoration: underline; }
+.stock-link:hover { color: #a5b4fc; }
+.section-title { padding: 8px 32px; font-size: 20px; font-weight: 600; color: #f8fafc; }
+.chart-full { padding: 0 32px 24px; }
+.chart-full .chart-box {  }
+.chart-full .chart { height: 500px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>📊 直到一万点 · 投资观点回测</h1>
+    <div class="sub">基于 2025-01 ~ 2026-01 雪球帖子 AI 提取 + 股价数据</div>
+  </div>
+  <div class="filters">
+    <label style="color:#94a3b8;font-size:13px;">最少提及</label>
+    <select id="minMentions" onchange="renderAll()">
+      <option value="1">1 次</option>
+      <option value="3" selected>3 次</option>
+      <option value="5">5 次</option>
+      <option value="10">10 次</option>
+    </select>
+    <label style="color:#94a3b8;font-size:13px;">搜索</label>
+    <input type="text" id="searchInput" placeholder="股票名/代码..." oninput="renderTable()">
+  </div>
+</div>
+
+<div class="cards" id="cards"></div>
+
+<div class="chart-grid">
+  <div class="chart-box"><h3>📈 收益分布（提及 ≥ 3次）</h3><div class="chart" id="chartScatter"></div></div>
+  <div class="chart-box"><h3>🎯 看好程度 vs 实际收益</h3><div class="chart" id="chartSentiment"></div></div>
+</div>
+
+<div class="chart-grid">
+  <div class="chart-box"><h3>⏱ 各时间窗口胜率对比（Top 15）</h3><div class="chart" id="chartHeatmap"></div></div>
+  <div class="chart-box"><h3>🏆 Top 10 高频股 累计收益曲线</h3><div class="chart" id="chartCumulative"></div></div>
+</div>
+
+<div class="section-title">📋 全部个股明细</div>
+<div class="table-box">
+  <div class="table-wrap">
+    <table id="stockTable">
+      <thead>
+        <tr>
+          <th onclick="sortTable('name')">股票 ↕</th>
+          <th onclick="sortTable('count')">提及 ↕</th>
+          <th onclick="sortTable('avg_5d')">5日收益 ↕</th>
+          <th onclick="sortTable('win_5d')">5日胜率 ↕</th>
+          <th onclick="sortTable('avg_10d')">10日收益 ↕</th>
+          <th onclick="sortTable('win_10d')">10日胜率 ↕</th>
+          <th onclick="sortTable('avg_20d')">20日收益 ↕</th>
+          <th onclick="sortTable('win_20d')">20日胜率 ↕</th>
+          <th onclick="sortTable('avg_60d')">60日收益 ↕</th>
+          <th onclick="sortTable('win_60d')">60日胜率 ↕</th>
+          <th>主要态度</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let rawData = null;
+let sortKey = 'count';
+let sortAsc = false;
+
+// Load JSON
+fetch('user_7845696728_backtest.json')
+  .then(r => r.json())
+  .then(d => { rawData = d; renderAll(); })
+  .catch(e => document.body.innerHTML += `<div style="padding:32px;color:#ef4444;">数据加载失败: ${e.message}</div>`);
+
+function getStocks() {
+  const mm = +document.getElementById('minMentions').value;
+  const stocks = [];
+  for (const [key, val] of Object.entries(rawData.stock_stats)) {
+    if (val.count < mm) continue;
+    const m = key.match(/^(.+)\(([^)]+)\)$/);
+    stocks.push({
+      name: m ? m[1] : key,
+      ts_code: m ? m[2] : '',
+      code: (m ? m[2] : key).split('.')[0],
+      ...val,
+    });
+  }
+  return stocks;
+}
+
+function renderAll() {
+  renderCards();
+  renderScatter();
+  renderSentiment();
+  renderHeatmap();
+  renderCumulative();
+  renderTable();
+}
+
+function renderCards() {
+  const stocks = getStocks();
+  const totalMentions = stocks.reduce((s, x) => s + x.count, 0);
+  const avg20 = stocks.reduce((s, x) => s + (x.avg_20d || 0) * x.count, 0) / totalMentions;
+  const totalWin20 = stocks.reduce((s, x) => s + (x.win_20d || 0) * x.count, 0) / totalMentions;
+  const posCount = stocks.filter(x => (x.avg_20d || 0) > 0).length;
+
+  document.getElementById('cards').innerHTML = `
+    <div class="card"><div class="label">统计个股数</div><div class="value">${stocks.length}</div></div>
+    <div class="card"><div class="label">总提及次数</div><div class="value">${totalMentions}</div></div>
+    <div class="card"><div class="label">加权平均 20 日收益</div><div class="value ${avg20 >= 0 ? 'positive' : 'negative'}">${avg20 >= 0 ? '+' : ''}${avg20.toFixed(1)}%</div></div>
+    <div class="card"><div class="label">加权平均 20 日胜率</div><div class="value">${totalWin20.toFixed(0)}%</div></div>
+    <div class="card"><div class="label">正收益个股占比</div><div class="value">${(posCount / stocks.length * 100).toFixed(0)}%</div></div>
+  `;
+}
+
+function renderScatter() {
+  const stocks = getStocks();
+  const data = stocks.filter(x => x.avg_20d != null && x.win_20d != null).map(x => ({
+    name: x.name,
+    value: [x.avg_20d, x.win_20d, x.count],
+    count: x.count,
+    code: x.code,
+    avg20: x.avg_20d,
+    win20: x.win_20d,
+  }));
+
+  const option = {
+    backgroundColor: 'transparent',
+    tooltip: {
+      formatter: p => `<b>${p.data.name}</b> (${p.data.code})<br/>20日收益: ${p.data.avg20.toFixed(1)}%<br/>胜率: ${p.data.win20.toFixed(0)}%<br/>提及: ${p.data.count} 次`,
+    },
+    xAxis: { name: '20日平均收益 (%)', nameTextStyle: { color: '#94a3b8' }, axisLine: { lineStyle: { color: '#475569' } }, axisLabel: { color: '#94a3b8', formatter: v => v + '%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
+    yAxis: { name: '20日胜率 (%)', nameTextStyle: { color: '#94a3b8' }, axisLine: { lineStyle: { color: '#475569' } }, axisLabel: { color: '#94a3b8', formatter: v => v + '%' }, splitLine: { lineStyle: { color: '#1e293b' } }, max: 100 },
+    series: [{
+      type: 'scatter',
+      data,
+      symbolSize: v => Math.max(6, Math.sqrt(v[2]) * 5),
+      itemStyle: {
+        color: v => v.data.avg20 >= 0 ? (v.data.avg20 >= 10 ? '#22c55e' : '#4ade80') : (v.data.avg20 <= -10 ? '#ef4444' : '#f87171'),
+        opacity: 0.75,
+      },
+      emphasis: { scale: 2, itemStyle: { opacity: 1 } },
+    }],
+    grid: { left: 60, right: 30, top: 20, bottom: 50 },
+  };
+  const chart = echarts.init(document.getElementById('chartScatter'));
+  chart.setOption(option);
+  chart.on('click', params => { document.getElementById('searchInput').value = params.data.name; renderTable(); });
+  window.addEventListener('resize', () => chart.resize());
+}
+
+function renderSentiment() {
+  const ss = rawData.sentiment_stats;
+  const order = ['强烈看好', '看好', '中性', '谨慎', '看空'];
+  const periods = ['5d', '10d', '20d', '60d'];
+  const series = periods.map(p => ({
+    name: p.replace('d', '日'),
+    type: 'bar',
+    data: order.map(s => (ss[s] && ss[s][`avg_${p}`] != null) ? ss[s][`avg_${p}`] : null),
+    label: { show: true, position: 'outside', formatter: v => v.value != null ? (v.value >= 0 ? '+' : '') + v.value.toFixed(1) + '%' : '', fontSize: 11, color: '#cbd5e1' },
+    itemStyle: { borderRadius: 4 },
+    barGap: '20%',
+  }));
+
+  const option = {
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis' },
+    legend: { textStyle: { color: '#94a3b8' }, top: 0 },
+    xAxis: { data: order, axisLabel: { color: '#e2e8f0' }, axisLine: { lineStyle: { color: '#475569' } } },
+    yAxis: { name: '平均收益 (%)', nameTextStyle: { color: '#94a3b8' }, axisLabel: { color: '#94a3b8', formatter: v => v + '%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
+    series,
+    grid: { left: 60, right: 30, top: 50, bottom: 40 },
+    color: ['#818cf8', '#6366f1', '#4f46e5', '#3730a3'],
+  };
+  const chart = echarts.init(document.getElementById('chartSentiment'));
+  chart.setOption(option);
+  window.addEventListener('resize', () => chart.resize());
+}
+
+function renderHeatmap() {
+  const stocks = getStocks().filter(x => x.count >= 3).sort((a, b) => b.count - a.count).slice(0, 15);
+  const periods = ['5d', '10d', '20d', '60d'];
+  const data = [];
+  stocks.forEach((s, si) => {
+    periods.forEach((p, pi) => {
+      data.push([pi, si, s[`win_${p}`] != null ? s[`win_${p}`] : 0]);
+    });
+  });
+
+  const option = {
+    backgroundColor: 'transparent',
+    tooltip: {
+      formatter: p => {
+        const s = stocks[p.data[1]];
+        const pname = periods[p.data[0]];
+        const ret = s[`avg_${pname}`];
+        const win = s[`win_${pname}`];
+        return `<b>${s.name}</b><br/>${pname.replace('d','')}日: ${ret != null ? (ret >= 0 ? '+' : '') + ret.toFixed(1) + '%' : 'N/A'} | 胜率 ${win != null ? win.toFixed(0) + '%' : 'N/A'}`;
+      },
+    },
+    xAxis: { data: periods.map(p => p.replace('d', '日')), axisLabel: { color: '#94a3b8' }, axisLine: { lineStyle: { color: '#475569' } } },
+    yAxis: { data: stocks.map(s => s.name.length > 4 ? s.name.slice(0,4) : s.name), axisLabel: { color: '#e2e8f0', fontSize: 12 }, axisLine: { lineStyle: { color: '#475569' } } },
+    visualMap: { min: 0, max: 100, calculable: true, orient: 'horizontal', left: 'center', bottom: 0, inRange: { color: ['#1e293b', '#334155', '#6366f1', '#818cf8', '#22c55e'] }, textStyle: { color: '#94a3b8' } },
+    series: [{
+      type: 'heatmap',
+      data,
+      label: { show: true, formatter: v => v.data[2].toFixed(0) + '%', fontSize: 11, color: '#f8fafc' },
+      emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.5)' } },
+    }],
+    grid: { left: 60, right: 30, top: 10, bottom: 60 },
+  };
+  const chart = echarts.init(document.getElementById('chartHeatmap'));
+  chart.setOption(option);
+  window.addEventListener('resize', () => chart.resize());
+}
+
+function renderCumulative() {
+  // Simulate cumulative return for top stocks - show 20d return as proxy for cumulative
+  const stocks = getStocks().filter(x => x.count >= 5).sort((a, b) => (b.avg_20d || -999) - (a.avg_20d || -999)).slice(0, 10);
+  const cats = stocks.map(s => s.name.length > 5 ? s.name.slice(0, 5) : s.name);
+  const series = ['5d', '10d', '20d', '60d'].map(p => ({
+    name: p.replace('d', '日'),
+    type: 'line',
+    data: stocks.map(s => s[`avg_${p}`]),
+    smooth: true,
+    symbol: 'circle',
+    symbolSize: 8,
+  }));
+
+  const option = {
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis' },
+    legend: { textStyle: { color: '#94a3b8' }, top: 0, data: ['5日', '10日', '20日', '60日'] },
+    xAxis: { data: cats, axisLabel: { color: '#e2e8f0', rotate: 30, fontSize: 11 }, axisLine: { lineStyle: { color: '#475569' } } },
+    yAxis: { name: '收益 (%)', nameTextStyle: { color: '#94a3b8' }, axisLabel: { color: '#94a3b8', formatter: v => v + '%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
+    series,
+    grid: { left: 60, right: 30, top: 50, bottom: 60 },
+    color: ['#94a3b8', '#a5b4fc', '#818cf8', '#6366f1'],
+  };
+  const chart = echarts.init(document.getElementById('chartCumulative'));
+  chart.setOption(option);
+  window.addEventListener('resize', () => chart.resize());
+}
+
+function sortTable(key) {
+  if (sortKey === key) sortAsc = !sortAsc; else { sortKey = key; sortAsc = false; }
+  renderTable();
+}
+
+function renderTable() {
+  let stocks = getStocks();
+  const q = document.getElementById('searchInput').value.trim().toLowerCase();
+  if (q) stocks = stocks.filter(x => x.name.toLowerCase().includes(q) || x.code.includes(q));
+  stocks.sort((a, b) => {
+    const va = a[sortKey] != null ? a[sortKey] : -Infinity;
+    const vb = b[sortKey] != null ? b[sortKey] : -Infinity;
+    return sortAsc ? va - vb : vb - va;
+  });
+
+  const fmt = (v, isPct = true) => {
+    if (v == null) return 'N/A';
+    const cls = v >= 0 ? 'positive' : 'negative';
+    const pre = v >= 0 ? '+' : '';
+    return `<span class="${cls}">${pre}${v.toFixed(1)}${isPct ? '%' : ''}</span>`;
+  };
+  const winFmt = (v) => {
+    if (v == null) return 'N/A';
+    const cls = v >= 60 ? 'win-high' : (v >= 40 ? 'win-mid' : 'win-low');
+    return `<span class="${cls}">${v.toFixed(0)}%</span>`;
+  };
+
+  document.querySelector('#stockTable tbody').innerHTML = stocks.map(s => `
+    <tr>
+      <td><span class="stock-link" onclick="document.getElementById('searchInput').value='${s.name}';renderTable();">${s.name}</span> <span style="color:#64748b;font-size:11px;">${s.code}</span></td>
+      <td>${s.count}</td>
+      <td>${fmt(s.avg_5d)}</td>
+      <td>${winFmt(s.win_5d)}</td>
+      <td>${fmt(s.avg_10d)}</td>
+      <td>${winFmt(s.win_10d)}</td>
+      <td>${fmt(s.avg_20d)}</td>
+      <td>${winFmt(s.win_20d)}</td>
+      <td>${fmt(s.avg_60d)}</td>
+      <td>${winFmt(s.win_60d)}</td>
+      <td>${s.top_sentiment || '-'}</td>
+    </tr>
+  `).join('');
+}
+</script>
+</body>
+</html>

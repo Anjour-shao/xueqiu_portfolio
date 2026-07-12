@@ -117,91 +117,20 @@ def build_report_context(
     *,
     run_time: str,
     simulate_note: str = "",
-    account: Any | None = None,
-    quotes: list[Any] | None = None,
     updates: list[Any] | None = None,
     watch_summary: dict[str, Any] | None = None,
-    copy_plan: dict[str, Any] | None = None,
     cookie_alert: dict[str, str] | None = None,
+    user_posts: Any | None = None,
 ) -> dict[str, Any]:
     ctx: dict[str, Any] = {
         "title": "每日组合简报",
         "run_time": run_time,
         "simulate_note": simulate_note,
-        "account": None,
-        "holdings": [],
         "updates": [],
         "watch_summary": watch_summary,
-        "copy_plan": None,
         "cookie_alert": cookie_alert,
+        "user_posts": None,
     }
-
-    if account is not None:
-        ctx["account"] = {
-            "name": account.name,
-            "total_assets": account.total_assets,
-            "total_assets_fmt": _fmt_money(account.total_assets, signed=False)
-            if account.total_assets is not None
-            else None,
-            "market_value_fmt": _fmt_money(account.market_value, signed=False),
-            "cash_fmt": _fmt_money(account.cash, signed=False) if account.cash is not None else None,
-            "daily_pnl_fmt": _fmt_money(account.daily_pnl),
-            "daily_pnl_pct_fmt": _fmt_pct(account.daily_pnl_pct),
-            "daily_cls": _pnl_class(account.daily_pnl),
-            "holding_pnl_fmt": _fmt_money(account.holding_pnl),
-            "holding_pnl_pct_fmt": _fmt_pct(account.holding_pnl_pct),
-            "holding_cls": _pnl_class(account.holding_pnl),
-        }
-
-    holdings: list[dict[str, Any]] = []
-    for q in quotes or []:
-        if getattr(q, "error", ""):
-            holdings.append(
-                {
-                    "name": q.name,
-                    "code": q.code,
-                    "error": q.error,
-                    "price_fmt": "-",
-                    "change_pct_fmt": "-",
-                    "daily_pnl_fmt": "",
-                    "change_cls": "flat",
-                    "pnl_pct_fmt": "-",
-                    "pnl_amt_fmt": "",
-                    "pnl_cls": "flat",
-                    "hfq_pnl_fmt": "",
-                }
-            )
-            continue
-        holdings.append(
-            {
-                "name": q.name,
-                "code": q.code,
-                "error": "",
-                "holding_days": q.holding_days,
-                "shares_fmt": f"{int(q.shares)}股" if q.shares else "",
-                "weight_fmt": f"{q.weight_pct:.1f}%" if q.weight_pct is not None else "",
-                "price_fmt": f"{q.price:.2f}" if q.price is not None else "-",
-                "change_pct_fmt": _fmt_pct(q.change_pct),
-                "daily_pnl_fmt": _fmt_money(q.daily_pnl_amount),
-                "change_cls": _pnl_class(q.change_pct),
-                "pnl_pct_fmt": _fmt_pct(q.unrealized_pnl_pct),
-                "pnl_amt_fmt": _fmt_money(q.unrealized_pnl_amount),
-                "pnl_cls": _pnl_class(q.unrealized_pnl_pct),
-                "hfq_pnl_fmt": _fmt_pct(q.hfq_pnl_pct) if q.hfq_pnl_pct is not None else "",
-            }
-        )
-
-    def _weight_key(h: dict[str, Any]) -> float:
-        w = h.get("weight_fmt", "")
-        if w.endswith("%"):
-            try:
-                return float(w[:-1])
-            except ValueError:
-                pass
-        return 0.0
-
-    holdings.sort(key=_weight_key, reverse=True)
-    ctx["holdings"] = holdings
 
     upd_list: list[dict[str, Any]] = []
     for upd in updates or []:
@@ -244,43 +173,13 @@ def build_report_context(
         )
     ctx["updates"] = upd_list
 
-    if copy_plan and copy_plan.get("actions"):
-        plan_actions: list[dict[str, Any]] = []
-        for item in copy_plan.get("actions") or []:
-            action = str(item.get("action", ""))
-            if action == "买入":
-                badge, short = "buy", "买"
-            elif action == "卖出":
-                badge, short = "sell", "卖"
-            else:
-                badge, short = "other", action[:1] or "·"
-            plan_actions.append(
-                {
-                    "action_short": short,
-                    "badge_cls": badge,
-                    "name": item.get("stock_name", ""),
-                    "code": item.get("ts_code", ""),
-                    "shares_delta": item.get("shares_delta", 0),
-                    "suggest_weight_fmt": f"{item.get('target_weight_pct', 0):.1f}%",
-                    "price_fmt": f"{item.get('price'):.2f}" if item.get("price") else "-",
-                    "amount_fmt": _fmt_money(item.get("amount")),
-                    "weight_change": (
-                        f"现 {item.get('current_weight_pct', 0):.1f}% → 建议 {item.get('target_weight_pct', 0):.1f}%"
-                    ),
-                }
-            )
-        ctx["copy_plan"] = {
-            "strategy_label": copy_plan.get("strategy_label", ""),
-            "strategy_id": copy_plan.get("strategy_id", ""),
-            "actions": plan_actions,
-            "note": copy_plan.get("note", ""),
-        }
-    elif copy_plan and copy_plan.get("note"):
-        ctx["copy_plan"] = {
-            "strategy_label": copy_plan.get("strategy_label", ""),
-            "strategy_id": copy_plan.get("strategy_id", ""),
-            "actions": [],
-            "note": copy_plan.get("note", ""),
+    if user_posts is not None and getattr(user_posts, "summary", ""):
+        ctx["user_posts"] = {
+            "post_count": getattr(user_posts, "post_count", 0),
+            "summary": getattr(user_posts, "summary", ""),
+            "summary_lines": _ai_summary_to_lines(
+                getattr(user_posts, "summary", ""), limit=2000
+            ),
         }
     return ctx
 
@@ -466,23 +365,19 @@ def push_digest_image(
     *,
     run_time: str,
     simulate_note: str = "",
-    account: Any | None = None,
-    quotes: list[Any] | None = None,
     updates: list[Any] | None = None,
     watch_summary: dict[str, Any] | None = None,
-    copy_plan: dict[str, Any] | None = None,
     cookie_alert: dict[str, str] | None = None,
+    user_posts: Any | None = None,
     title: str = "每日组合",
 ) -> tuple[bool, Path | None]:
     context = build_report_context(
         run_time=run_time,
         simulate_note=simulate_note,
-        account=account,
-        quotes=quotes,
         updates=updates,
         watch_summary=watch_summary,
-        copy_plan=copy_plan,
         cookie_alert=cookie_alert,
+        user_posts=user_posts,
     )
     html = render_report_html(context)
     safe_time = re.sub(r"[^\d]", "", run_time)[:12] or "digest"
@@ -507,8 +402,8 @@ def push_digest_image(
         caption += f"\n\n组合调仓: {names}"
     elif watch_summary and watch_summary.get("count"):
         caption += f"\n\n组合调仓: 今晚无新调仓（已巡检 {watch_summary['count']} 个）"
-    if copy_plan and copy_plan.get("actions"):
-        caption += f"\n\n抄作业调仓: {len(copy_plan['actions'])} 笔建议"
+    if user_posts and getattr(user_posts, "post_count", 0) > 0:
+        caption += f"\n\n用户观点: 今日 {getattr(user_posts, 'post_count', 0)} 条发言 · AI 已提炼"
     if cookie_alert:
         caption += "\n\n⚠️ Cookie 已失效，请更新后重试"
 

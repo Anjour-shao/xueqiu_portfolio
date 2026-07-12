@@ -165,6 +165,90 @@ personal_trades_table = Table(
     Column("created_at", DateTime, nullable=False),
 )
 
+# ---- 雪球观点提取 ----
+
+xueqiu_posts_table = Table(
+    "xueqiu_posts",
+    metadata,
+    Column("post_id", BigInteger, primary_key=True),
+    Column("user_id", BigInteger, nullable=False, index=True),
+    Column("user_name", String(255), nullable=False),
+    Column("created_at", String(32), nullable=False, index=True),
+    Column("text", Text, nullable=False),
+    Column("retweet_count", Integer, nullable=False, server_default=text("0")),
+    Column("reply_count", Integer, nullable=False, server_default=text("0")),
+    Column("like_count", Integer, nullable=False, server_default=text("0")),
+    Column("source", String(255), nullable=True),
+    Column("target", String(255), nullable=True),
+    Column("fetched_at", DateTime, nullable=False),
+)
+
+xueqiu_comments_table = Table(
+    "xueqiu_comments",
+    metadata,
+    Column("comment_id", BigInteger, primary_key=True),
+    Column("post_id", BigInteger, ForeignKey("xueqiu_posts.post_id"), nullable=False, index=True),
+    Column("user_id", BigInteger, nullable=True),
+    Column("user_name", String(255), nullable=True),
+    Column("created_at", String(32), nullable=False),
+    Column("text", Text, nullable=False),
+    Column("reply_to_comment_id", BigInteger, nullable=True),
+    Column("info_score", Float, nullable=True),
+    Column("is_author_reply", Boolean, nullable=False, server_default=text("0")),
+    Column("fetched_at", DateTime, nullable=False),
+)
+
+xueqiu_extractions_table = Table(
+    "xueqiu_extractions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("post_id", BigInteger, ForeignKey("xueqiu_posts.post_id"), nullable=False, index=True),
+    Column("has_info", Boolean, nullable=False, server_default=text("0")),
+    Column("summary", Text, nullable=True),
+    Column("macro_views", Text, nullable=True),
+    Column("model_used", String(64), nullable=True),
+    Column("extracted_at", DateTime, nullable=False),
+    UniqueConstraint("post_id", name="uq_extraction_post"),
+)
+
+extraction_stocks_table = Table(
+    "extraction_stocks",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("extraction_id", Integer, ForeignKey("xueqiu_extractions.id"), nullable=False, index=True),
+    Column("stock_name", String(255), nullable=False),
+    Column("stock_code", String(16), nullable=True),
+    Column("mention_type", String(32), nullable=False),
+    Column("raw_text", String(255), nullable=True),
+    Column("sentiment", String(32), nullable=True),
+    Column("time_horizon", String(32), nullable=True),
+    Column("key_logic", Text, nullable=True),
+    Column("confidence", Float, nullable=False, server_default=text("0.5")),
+)
+
+extraction_sectors_table = Table(
+    "extraction_sectors",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("extraction_id", Integer, ForeignKey("xueqiu_extractions.id"), nullable=False, index=True),
+    Column("sector_name", String(255), nullable=False),
+    Column("sentiment", String(32), nullable=True),
+    Column("time_horizon", String(32), nullable=True),
+    Column("key_logic", Text, nullable=True),
+)
+
+nickname_map_table = Table(
+    "nickname_map",
+    metadata,
+    Column("nickname", String(255), primary_key=True),
+    Column("stock_name", String(255), nullable=False),
+    Column("stock_code", String(16), nullable=True),
+    Column("confidence", Float, nullable=False, server_default=text("0.5")),
+    Column("confirmed", Boolean, nullable=False, server_default=text("0")),
+    Column("created_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+)
+
 engine: Engine = create_engine(DATABASE_URL, future=True)
 
 
@@ -328,6 +412,76 @@ def _ensure_personal_account_schema(conn: Connection) -> None:
         personal_trades_table.create(conn)
 
 
+def _ensure_xueqiu_analysis_schema(conn: Connection) -> None:
+    inspector = inspect(conn)
+    existing = set(inspector.get_table_names())
+    if "xueqiu_posts" not in existing:
+        xueqiu_posts_table.create(conn)
+    if "xueqiu_comments" not in existing:
+        xueqiu_comments_table.create(conn)
+    if "xueqiu_extractions" not in existing:
+        xueqiu_extractions_table.create(conn)
+    if "extraction_stocks" not in existing:
+        extraction_stocks_table.create(conn)
+    if "extraction_sectors" not in existing:
+        extraction_sectors_table.create(conn)
+    if "nickname_map" not in existing:
+        nickname_map_table.create(conn)
+
+
+def _seed_nickname_map(conn: Connection) -> None:
+    """预填已知代称映射（仅当表为空时）。"""
+    from datetime import datetime as dt
+
+    rows = conn.execute(
+        text("SELECT COUNT(*) AS cnt FROM nickname_map")
+    ).fetchone()
+    if rows and rows[0] > 0:
+        return
+
+    now = dt.now()
+    seeds = [
+        ("小姨", "兆易创新", "603986", 0.90, True, now, now),
+        ("罩衣", "兆易创新", "603986", 0.85, True, now, now),
+        ("赵姨", "兆易创新", "603986", 0.85, True, now, now),
+        ("赵毅", "兆易创新", "603986", 0.70, True, now, now),
+        ("赵一", "兆易创新", "603986", 0.70, True, now, now),
+        ("德子", "德明利", "309031", 0.95, True, now, now),
+        ("德明利", "德明利", "309031", 1.00, True, now, now),
+        ("冉子", "香农芯创", "300475", 0.60, False, now, now),
+        ("香", "香农芯创", "300475", 0.50, False, now, now),
+        ("寒王", "寒武纪", "688256", 0.95, True, now, now),
+        ("寒无纪", "寒武纪", "688256", 0.90, True, now, now),
+        ("无忌", "寒武纪", "688256", 0.60, False, now, now),
+        ("张无忌", "拓荆科技", "688072", 0.70, False, now, now),
+        ("拓荆", "拓荆科技", "688072", 1.00, True, now, now),
+        ("东土", "东土科技", "300353", 0.80, True, now, now),
+        ("长信", "长信科技", "300088", 0.70, False, now, now),
+        ("常山", "常山北明", "000158", 0.80, True, now, now),
+        ("闪迪", "闪迪", "SNDK", 1.00, True, now, now),
+        ("英伟达", "英伟达", "NVDA", 1.00, True, now, now),
+        ("荣昌", "荣昌生物", "688331", 0.85, True, now, now),
+        ("凯莱英", "凯莱英", "002821", 1.00, True, now, now),
+        ("瑞芯微", "瑞芯微", "603893", 1.00, True, now, now),
+        ("紫光", "紫光国微", "002049", 0.80, True, now, now),
+        ("中际", "中际旭创", "300308", 0.90, True, now, now),
+        ("新易盛", "新易盛", "300502", 1.00, True, now, now),
+        ("海力士", "SK海力士", "000660.KS", 1.00, True, now, now),
+    ]
+    for nickname, name, code, conf, confirmed, ctime, utime in seeds:
+        conn.execute(
+            nickname_map_table.insert().values(
+                nickname=nickname,
+                stock_name=name,
+                stock_code=code,
+                confidence=conf,
+                confirmed=confirmed,
+                created_at=ctime,
+                updated_at=utime,
+            )
+        )
+
+
 def init_db() -> None:
     metadata.create_all(engine)
 
@@ -342,6 +496,8 @@ def init_db() -> None:
         _ensure_discovery_symbol_pool_schema(conn)
         _ensure_discovery_crawled_users_schema(conn)
         _ensure_personal_account_schema(conn)
+        _ensure_xueqiu_analysis_schema(conn)
+        _seed_nickname_map(conn)
 
 
 def init_personal_db() -> None:
