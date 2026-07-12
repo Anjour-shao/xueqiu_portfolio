@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -1335,3 +1336,274 @@ def get_copy_rebalance_plan(strategy_id: str | None = None) -> dict[str, Any]:
     from xueqiu.domain.personal_account import compute_copy_rebalance_plan
 
     return compute_copy_rebalance_plan(strategy_id=strategy_id)
+
+
+def iter_stock_summary_stream(keyword: str, pages: int = 10) -> Any:
+    """SSE 流式生成器：解析股票 → 爬讨论区 → 清洗 → AI 汇总。
+
+    Args:
+        keyword: 股票名称或 6 位代码
+        pages: 讨论区爬取页数（每页 20 条），默认 10
+    """
+    import json
+    import sys
+
+    def _emit(step: str, message: str, result: dict[str, Any] | None = None) -> str:
+        payload: dict[str, Any] = {"step": step, "message": message}
+        if result is not None:
+            payload["result"] = result
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    kw = keyword.strip()
+    if not kw:
+        yield _emit("error", "请输入股票名称或代码")
+        yield _emit("done", "输入为空")
+        return
+
+    max_pages = max(1, min(pages, 30))  # 限制 1-30 页
+
+    # ---- Step 1: 解析股票代码 ----
+    yield _emit("resolve", f"正在解析: {kw} …")
+
+    from xueqiu.domain.codes import to_xueqiu_code
+    from xueqiu.integrations.xueqiu.client import XueQiuApiClient
+
+    # 尝试直接作为代码处理
+    xq_code = ""
+    stock_name = ""
+    company_info: dict[str, str] = {}
+    digits = "".join(c for c in kw if c.isdigit())
+    if len(digits) == 6:
+        if digits.startswith(("5", "6", "9")):
+            xq_code = f"SH{digits}"
+        else:
+            xq_code = f"SZ{digits}"
+
+    try:
+        client = XueQiuApiClient()
+    except Exception as exc:
+        yield _emit("error", f"雪球 API 初始化失败: {exc}")
+        yield _emit("done", "初始化失败")
+        return
+
+    # ---- 通过 ashare_system.stock_basic 解析名称/代码 ----
+    try:
+        from sqlalchemy import create_engine, text as sa_text
+        from xueqiu.config import DATABASE_URL
+
+        ashare_url = DATABASE_URL.replace("/portfolio?", "/ashare_system?")
+        ashare_engine = create_engine(ashare_url, pool_pre_ping=True)
+
+        with ashare_engine.connect() as conn:
+            if xq_code:
+                raw_code = xq_code[2:]
+                row = conn.execute(
+                    sa_text(
+                        "SELECT ts_code, name, industry, area, list_date FROM stock_basic "
+                        "WHERE symbol = :sym OR ts_code = :ts LIMIT 1"
+                    ),
+                    {"sym": raw_code, "ts": f"{raw_code}.{xq_code[:2]}"},
+                ).fetchone()
+                if row is not None:
+                    stock_name = str(row[1])
+                    company_info = {
+                        "industry": str(row[2] or ""),
+                        "area": str(row[3] or ""),
+                        "list_date": str(row[4] or "")[:10] if row[4] else "",
+                    }
+            else:
+                rows = conn.execute(
+                    sa_text(
+                        "SELECT ts_code, name, industry, area, list_date FROM stock_basic "
+                        "WHERE name LIKE :kw ORDER BY "
+                        "CASE WHEN name = :exact THEN 0 ELSE 1 END, "
+                        "ts_code LIMIT 5"
+                    ),
+                    {"kw": f"%{kw}%", "exact": kw},
+                ).fetchall()
+                if rows:
+                    row = rows[0]
+                    ts_code = str(row[0])
+                    stock_name = str(row[1])
+                    xq_code = to_xueqiu_code(ts_code)
+                    company_info = {
+                        "industry": str(row[2] or ""),
+                        "area": str(row[3] or ""),
+                        "list_date": str(row[4] or "")[:10] if row[4] else "",
+                    }
+                    if len(rows) > 1:
+                        names = ", ".join(str(r[1]) for r in rows[:3])
+                        yield _emit("resolve", f"找到多个匹配: {names}，已选 {stock_name}")
+
+        company_desc = ""
+        if company_info:
+            parts = [f"{stock_name}"]
+            if company_info.get("industry"):
+                parts.append(f"行业: {company_info['industry']}")
+            if company_info.get("area"):
+                parts.append(f"地区: {company_info['area']}")
+            if company_info.get("list_date"):
+                parts.append(f"上市: {company_info['list_date']}")
+            company_desc = "，".join(parts)
+            yield _emit("resolve", f"公司信息: {company_desc}")
+        elif xq_code:
+            yield _emit("resolve", f"已解析: {xq_code} {stock_name}（未查到公司详细信息）")
+
+    except Exception as exc:
+        yield _emit("resolve", f"本地 stock_basic 查询失败: {exc}，尝试 TuShare 回退…")
+        # TuShare fallback (略，逻辑同上)
+        try:
+            from xueqiu.config import TUSHARE_API_KEY
+            if TUSHARE_API_KEY:
+                import tushare as ts
+                pro = ts.pro_api(TUSHARE_API_KEY)
+                if xq_code:
+                    raw_code = xq_code[2:]
+                    df = pro.stock_basic(ts_code=f"{raw_code}.{xq_code[:2]}", fields="ts_code,name,industry,area,list_date")
+                    if df is not None and not df.empty:
+                        r = df.iloc[0]
+                        stock_name = str(r["name"])
+                        company_info = {"industry": str(r.get("industry") or ""), "area": str(r.get("area") or ""), "list_date": str(r.get("list_date") or "")[:10]}
+                else:
+                    df = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name,industry,area,list_date")
+                    if df is not None and not df.empty:
+                        match = df[df["name"].str.contains(kw, na=False)]
+                        if not match.empty:
+                            r = match.iloc[0]
+                            ts_code = str(r["ts_code"])
+                            stock_name = str(r["name"])
+                            xq_code = to_xueqiu_code(ts_code)
+                            company_info = {"industry": str(r.get("industry") or ""), "area": str(r.get("area") or ""), "list_date": str(r.get("list_date") or "")[:10]}
+        except Exception:
+            pass
+
+    if not xq_code:
+        yield _emit("error", f"未找到匹配的股票: {kw}（请尝试输入 6 位代码如 600522）")
+        yield _emit("done", "未找到股票")
+        return
+
+    yield _emit("resolve", f"已解析: {xq_code} {stock_name}")
+
+    # ---- Step 2: 爬取讨论区 ----
+    yield _emit("fetch", f"正在爬取 {stock_name}({xq_code}) 讨论区（最多 {max_pages} 页）…")
+
+    all_posts: list[Any] = []
+    for page in range(1, max_pages + 1):
+        try:
+            from xueqiu.integrations.xueqiu.posts import fetch_stock_posts_page
+            posts, has_more = fetch_stock_posts_page(client, xq_code, page=page, size=20, sort="time")
+            all_posts.extend(posts)
+            yield _emit("fetch", f"第 {page}/{max_pages} 页: {len(posts)} 条帖子 {'(还有更多)' if has_more else '(已到底)'}")
+            if not has_more:
+                break
+        except Exception as exc:
+            yield _emit("fetch", f"第 {page} 页获取失败: {exc}")
+            break
+
+    yield _emit("fetch", f"共爬取 {len(all_posts)} 条帖子")
+
+    # ---- Step 3: 清洗评论 ----
+    yield _emit("clean", "正在清洗评论数据 …")
+
+    daily_digest_root = Path(__file__).resolve().parent.parent.parent.parent / "daily_digest"
+    if str(daily_digest_root) not in sys.path:
+        sys.path.insert(0, str(daily_digest_root))
+
+    from daily_portfolio_digest import clean_xueqiu_comments
+
+    comments = [p.text for p in all_posts if p.text]
+    unique_comments = list(dict.fromkeys(comments))
+    cleaned = clean_xueqiu_comments(unique_comments)
+    # 不刻意截断，保留更多数据给 AI
+    comment_text = "\n".join(f"{i}. {t}" for i, t in enumerate(cleaned, 1))
+    yield _emit("clean", f"清洗完成: 原始 {len(comments)} → 去重 {len(unique_comments)} → 有效 {len(cleaned)} 条")
+
+    # ---- Step 4: AI 汇总 ----
+    yield _emit("ai", "正在调用 AI 深度分析 …")
+
+    if not comment_text or len(comment_text) < 20:
+        yield _emit("done", "讨论数据不足，无法汇总", {
+            "stock_name": stock_name, "stock_code": xq_code, "post_count": len(all_posts),
+            "summary": "近期无足够讨论数据或热度较低。",
+            "company_info": company_info,
+        })
+        return
+
+    # 使用独立的、更丰富的大模型调用（不套用每日推送的短摘要模板）
+    from openai import OpenAI
+    from xueqiu.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL
+
+    ai_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    yield _emit("ai", "AI 正在阅读讨论数据并撰写分析报告 …")
+
+    company_section = ""
+    if company_info:
+        company_section = f"""
+## 公司基本信息
+- 股票名称: {stock_name}
+- 行业: {company_info.get('industry', '未知')}
+- 地区: {company_info.get('area', '未知')}
+- 上市日期: {company_info.get('list_date', '未知')}
+（以上信息来自数据库，非讨论区提取内容。请在报告中据此介绍公司主营业务和行业地位，并结合讨论区观点分析其护城河/竞争壁垒。）
+"""
+
+    prompt = f"""你是一个专业的A股投资研究分析师。请根据以下雪球用户近期讨论，对【{stock_name}】做一份深度分析报告。
+
+{company_section}
+## 输出结构（严格按以下格式输出）
+
+【📌 公司概况】
+简要介绍公司主营业务（1-2 句话），结合讨论区信息分析其行业地位、护城河/竞争优势。若有争议也一并说明。
+
+【📈 看多逻辑】
+提取讨论区中看多的核心依据，每条用 - 开头，覆盖产业逻辑、业绩预期、政策催化等方面。
+
+【📉 看空隐患】
+提取讨论区中的担忧和风险点，每条用 - 开头。
+
+【📰 关键事件与基本面追踪】
+近期影响股价的关键事件、财报预期、订单传闻等，每条用 - 开头。
+
+【🎯 市场情绪判断】
+用 2-3 句话概括当前讨论区的整体情绪倾向（乐观/悲观/分歧），说明依据。
+
+【💡 总结】
+一句话总结，给出需要持续跟踪的核心变量。
+
+## 写作要求
+- 标题使用【】格式，正文中需要强调的词使用 **文字** 包裹
+- 不要使用 # 号标题、序号标题，保持文章流畅
+- 每个维度的要点数量不限，以覆盖充分为准，但避免重复
+- 基于讨论区内容，不要凭空编造
+- 语言专业、信息密度高，如同一篇研究报告
+
+## 讨论区原始数据
+{comment_text[:15000]}
+"""
+    try:
+        response = ai_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "你是专业的A股投资分析师。输出结构清晰、信息密度高、不编造内容。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=4096,
+        )
+        content = response.choices[0].message.content
+        summary = (content or "").strip()
+        yield _emit("ai", f"AI 分析完成（{len(summary)} 字）")
+    except Exception as exc:
+        yield _emit("error", f"AI 调用失败: {exc}")
+        yield _emit("done", "AI 分析失败")
+        return
+
+    # ---- Done ----
+    yield _emit("done", "分析完成", {
+        "stock_name": stock_name,
+        "stock_code": xq_code,
+        "post_count": len(all_posts),
+        "comment_count": len(cleaned),
+        "summary": summary,
+        "company_info": company_info,
+    })

@@ -6,6 +6,7 @@ import { HoldingsPage } from '../pages/HoldingsPage';
 import { OverviewPage } from '../pages/OverviewPage';
 import { DiscoverPage } from '../pages/DiscoverPage';
 import { MyPortfolioPage } from '../pages/MyPortfolioPage';
+import { StockSummaryPage } from '../pages/StockSummaryPage';
 import { SyncDataPage } from '../pages/SyncDataPage';
 
 export default function App() {
@@ -18,6 +19,7 @@ export default function App() {
           <Route path="my-portfolio" element={<MyPortfolioPage />} />
           <Route path="portfolio/:accountCode" element={<HoldingsPage />} />
           <Route path="discover" element={<DiscoverPage />} />
+          <Route path="stock-summary" element={<StockSummaryPage />} />
           <Route path="sync" element={<SyncDataPage />} />
           <Route path="compare" element={<ComparePage />} />
           <Route path="backtest" element={<BacktestPage />} />

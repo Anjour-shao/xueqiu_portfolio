@@ -2,6 +2,7 @@ import AccountBalanceWalletRoundedIcon from '@mui/icons-material/AccountBalanceW
 import CompareArrowsRoundedIcon from '@mui/icons-material/CompareArrowsRounded';
 import AssessmentRoundedIcon from '@mui/icons-material/AssessmentRounded';
 import DashboardRoundedIcon from '@mui/icons-material/DashboardRounded';
+import SearchRoundedIcon from '@mui/icons-material/SearchRounded';
 import SyncRoundedIcon from '@mui/icons-material/SyncRounded';
 import TravelExploreRoundedIcon from '@mui/icons-material/TravelExploreRounded';
 import type { SvgIconComponent } from '@mui/icons-material';
@@ -17,6 +18,7 @@ export const NAV_ITEMS: NavItem[] = [
   { path: '/overview', label: '总览', shortLabel: '总览', icon: DashboardRoundedIcon },
   { path: '/my-portfolio', label: '我的持仓', shortLabel: '持仓', icon: AccountBalanceWalletRoundedIcon },
   { path: '/discover', label: '挖组合', shortLabel: '挖组合', icon: TravelExploreRoundedIcon },
+  { path: '/stock-summary', label: '个股汇总', shortLabel: '个股', icon: SearchRoundedIcon },
   { path: '/sync', label: '数据同步', shortLabel: '同步', icon: SyncRoundedIcon },
   { path: '/compare', label: '组合对比', shortLabel: '对比', icon: CompareArrowsRoundedIcon },
   { path: '/backtest', label: '抄作业回测', shortLabel: '回测', icon: AssessmentRoundedIcon },

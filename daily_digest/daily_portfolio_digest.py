@@ -541,7 +541,9 @@ def fetch_today_user_posts(
     max_pages: int = 5,
 ) -> list[dict[str, Any]]:
     """逐页抓取用户 timeline，按 created_at 过滤当天帖子。
-    遇到日期 < 今天即停止（避免置顶帖等旧帖混入）。
+
+    雪球 timeline 第一页可能包含置顶帖（日期很旧），不能遇到旧帖就停。
+    改为：按页遍历，收集当天帖子；当某页完全没有当天帖子时停止（置顶帖不影响）。
     """
     today = _now().strftime("%Y-%m-%d")
     today_posts: list[dict[str, Any]] = []
@@ -559,9 +561,12 @@ def fetch_today_user_posts(
             print(f"      用户帖子第 {page} 页无数据，停止翻页。")
             break
 
+        page_has_today = False
+        oldest_date = ""
         for p in posts:
             post_date = (p.created_at or "")[:10]
             if post_date == today:
+                page_has_today = True
                 today_posts.append({
                     "id": p.id,
                     "text": p.text,
@@ -571,15 +576,25 @@ def fetch_today_user_posts(
                     "retweet_count": p.retweet_count,
                 })
             elif post_date and post_date < today:
-                # 已翻到昨天的帖，停止
-                print(f"      用户帖子已翻到 {post_date}（< 今天），停止翻页。")
-                return today_posts
+                if not oldest_date or post_date < oldest_date:
+                    oldest_date = post_date
+
+        if page_has_today:
+            print(f"      第 {page} 页命中当天帖子（本页累计 {len(today_posts)} 条当天），继续…")
+        else:
+            # 整页没有当天帖子，说明已翻过今天的内容范围
+            if oldest_date:
+                print(f"      第 {page} 页无当天帖子（最早 {oldest_date}），停止翻页。")
+            else:
+                print(f"      第 {page} 页无当天帖子，停止翻页。")
+            break
 
         if not has_more:
             break
         if page < max_pages:
             time.sleep(random.uniform(0.5, 1.0))
 
+    print(f"      用户 {user_id} 今日共 {len(today_posts)} 条帖子。")
     return today_posts
 
 

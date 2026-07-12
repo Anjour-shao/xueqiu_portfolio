@@ -229,3 +229,72 @@ export async function deleteAccount(accountKey: string) {
   const res = await api.delete<DeleteAccountResponse>(`/api/accounts/${encodeURIComponent(accountKey)}`);
   return res.data;
 }
+
+// ---- 个股汇总 SSE ----
+
+export type StockSummaryStep =
+  | 'resolve'
+  | 'fetch'
+  | 'clean'
+  | 'ai'
+  | 'done'
+  | 'error';
+
+export interface StockSummaryEvent {
+  step: StockSummaryStep;
+  message: string;
+  result?: {
+    stock_name: string;
+    stock_code: string;
+    post_count: number;
+    comment_count?: number;
+    summary: string;
+    company_info?: {
+      industry?: string;
+      area?: string;
+      list_date?: string;
+    };
+  };
+}
+
+export async function streamStockSummary(
+  keyword: string,
+  pages: number,
+  onEvent: (event: StockSummaryEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resp = await fetch('/api/stock-summary-stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: JSON.stringify({ keyword, pages }),
+    signal,
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(text || `请求失败 (${resp.status})`);
+  }
+  const reader = resp.body?.getReader();
+  if (!reader) throw new Error('无法读取响应流');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const chunks = buffer.split('\n\n');
+    buffer = chunks.pop() ?? '';
+    for (const chunk of chunks) {
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const event = JSON.parse(line.slice(6)) as StockSummaryEvent;
+          onEvent(event);
+        } catch {
+          // skip parse errors
+        }
+      }
+    }
+  }
+}
