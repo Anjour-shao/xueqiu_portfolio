@@ -542,8 +542,8 @@ def fetch_today_user_posts(
 ) -> list[dict[str, Any]]:
     """逐页抓取用户 timeline，按 created_at 过滤当天帖子。
 
-    雪球 timeline 第一页可能包含置顶帖（日期很旧），不能遇到旧帖就停。
-    改为：按页遍历，收集当天帖子；当某页完全没有当天帖子时停止（置顶帖不影响）。
+    雪球 timeline 前几页可能全是置顶帖（日期很旧），不能在第 1 页就停。
+    前 2 页无论如何都要翻完；从第 3 页起，遇到整页无当天帖才停止。
     """
     today = _now().strftime("%Y-%m-%d")
     today_posts: list[dict[str, Any]] = []
@@ -562,9 +562,11 @@ def fetch_today_user_posts(
             break
 
         page_has_today = False
-        oldest_date = ""
+        newest_date = ""
         for p in posts:
             post_date = (p.created_at or "")[:10]
+            if not newest_date or post_date > newest_date:
+                newest_date = post_date
             if post_date == today:
                 page_has_today = True
                 today_posts.append({
@@ -575,19 +577,16 @@ def fetch_today_user_posts(
                     "reply_count": p.reply_count,
                     "retweet_count": p.retweet_count,
                 })
-            elif post_date and post_date < today:
-                if not oldest_date or post_date < oldest_date:
-                    oldest_date = post_date
 
         if page_has_today:
-            print(f"      第 {page} 页命中当天帖子（本页累计 {len(today_posts)} 条当天），继续…")
+            print(f"      第 {page} 页命中当天帖子（累计 {len(today_posts)} 条），继续…")
         else:
-            # 整页没有当天帖子，说明已翻过今天的内容范围
-            if oldest_date:
-                print(f"      第 {page} 页无当天帖子（最早 {oldest_date}），停止翻页。")
+            # 前 2 页可能全是置顶帖，不在此停止
+            if page <= 2:
+                print(f"      第 {page} 页无当天帖子（最新 {newest_date}），可能有置顶帖，继续翻页…")
             else:
-                print(f"      第 {page} 页无当天帖子，停止翻页。")
-            break
+                print(f"      第 {page} 页无当天帖子（最新 {newest_date}），停止翻页。")
+                break
 
         if not has_more:
             break
@@ -768,8 +767,11 @@ def send_dingtalk_digest(
         md_parts.append("")
         md_parts.append(user_posts.summary)
         md_parts.append("")
-    if not updates and not (watch_summary and watch_summary["new_count"] == 0) and not user_posts:
-        md_parts.append("今晚无新调仓。")
+    if not updates and not user_posts:
+        if watch_summary and watch_summary.get("count"):
+            md_parts.append(f"今晚无新调仓（已巡检 {watch_summary['count']} 个关注组合）。")
+        else:
+            md_parts.append("今晚无新调仓。")
 
     send_dingtalk_markdown(title, "\n".join(md_parts).rstrip() + "\n")
 
@@ -956,17 +958,14 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
 
         state["last_digest_at"] = run_time
 
-        should_send = bool(updates) or bool(cookie_alert) or (user_posts and user_posts.post_count > 0)
-        if should_send:
-            send_dingtalk_digest(
-                run_time=run_time,
-                updates=updates,
-                force_markdown=force_markdown,
-                cookie_alert=cookie_alert,
-                user_posts=user_posts,
-            )
-        else:
-            print("关注组合无新调仓，今日无用户发言。")
+        # 每晚至少推送一次（有调仓或有发言或有 cookie 告警），仅当完全无事时也发一条摘要
+        send_dingtalk_digest(
+            run_time=run_time,
+            updates=updates,
+            force_markdown=force_markdown,
+            cookie_alert=cookie_alert,
+            user_posts=user_posts,
+        )
     finally:
         try:
             save_state(state)
