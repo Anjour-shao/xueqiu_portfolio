@@ -914,6 +914,198 @@ def check_portfolio_for_nightly_digest(
     )
 
 
+def _run_stock_query(keyword: str) -> None:
+    """单独查询某只股票的雪球讨论区 AI 分析，推送到钉钉。"""
+    kw = keyword.strip()
+    print(f"开始分析股票: {kw}")
+
+    from xueqiu.domain.codes import to_xueqiu_code
+    from xueqiu.integrations.xueqiu.client import XueQiuApiClient
+
+    # ---- 解析代码 ----
+    digits = "".join(c for c in kw if c.isdigit())
+    xq_code = ""
+    stock_name = kw
+    company_info: dict[str, str] = {}
+
+    if len(digits) == 6:
+        if digits.startswith(("5", "6", "9")):
+            xq_code = f"SH{digits}"
+        else:
+            xq_code = f"SZ{digits}"
+
+    try:
+        from sqlalchemy import create_engine, text as sa_text
+        from xueqiu.config import DATABASE_URL
+
+        ashare_url = DATABASE_URL.replace("/portfolio?", "/ashare_system?")
+        ashare_engine = create_engine(ashare_url, pool_pre_ping=True)
+        with ashare_engine.connect() as conn:
+            if xq_code:
+                raw_code = xq_code[2:]
+                row = conn.execute(
+                    sa_text(
+                        "SELECT ts_code, name, industry, area FROM stock_basic "
+                        "WHERE symbol = :sym OR ts_code = :ts LIMIT 1"
+                    ),
+                    {"sym": raw_code, "ts": f"{raw_code}.{xq_code[:2]}"},
+                ).fetchone()
+                if row:
+                    stock_name = str(row[1])
+                    company_info = {"industry": str(row[2] or ""), "area": str(row[3] or "")}
+            else:
+                rows = conn.execute(
+                    sa_text(
+                        "SELECT ts_code, name, industry, area FROM stock_basic "
+                        "WHERE name LIKE :kw ORDER BY ts_code LIMIT 5"
+                    ),
+                    {"kw": f"%{kw}%"},
+                ).fetchall()
+                if rows:
+                    row = rows[0]
+                    xq_code = to_xueqiu_code(str(row[0]))
+                    stock_name = str(row[1])
+                    company_info = {"industry": str(row[2] or ""), "area": str(row[3] or "")}
+    except Exception as exc:
+        print(f"数据库查询失败: {exc}")
+
+    if not xq_code:
+        title = f"查询失败 · {kw}"
+        md_text = f"❌ 未找到匹配的股票: **{kw}**\n\n请尝试输入 6 位代码，如 001270"
+        send_dingtalk_markdown(title, md_text)
+        return
+
+    print(f"解析结果: {stock_name} ({xq_code})")
+
+    # ---- 爬取讨论区 ----
+    print("正在爬取雪球讨论区...")
+    client = XueQiuApiClient()
+    all_posts = []
+    max_pages = 8  # 单股查询翻更多页
+    from xueqiu.integrations.xueqiu.posts import fetch_stock_posts_page
+
+    for page in range(1, max_pages + 1):
+        try:
+            posts, has_more = fetch_stock_posts_page(client, xq_code, page=page, size=20, sort="time")
+            all_posts.extend(posts)
+            print(f"  第 {page} 页: {len(posts)} 条 {'(已到底)' if not has_more else ''}")
+            if not has_more:
+                break
+        except Exception as exc:
+            print(f"  第 {page} 页获取失败: {exc}")
+            break
+
+    if not all_posts:
+        title = f"无数据 · {stock_name}"
+        md_text = f"⚠ {stock_name}({xq_code}) 讨论区暂无近期帖子。"
+        send_dingtalk_markdown(title, md_text)
+        return
+
+    print(f"共获取 {len(all_posts)} 条帖子")
+
+    # ---- 清洗评论 ----
+    comments = [p.text for p in all_posts if p.text]
+    unique = list(dict.fromkeys(comments))
+    cleaned = clean_xueqiu_comments(unique)
+    comment_text = "\n".join(f"{i}. {t}" for i, t in enumerate(cleaned[:100], 1))
+    print(f"清洗: {len(comments)} -> {len(unique)} -> {len(cleaned)} 条")
+
+    # ---- AI 分析 ----
+    print("正在调用 DeepSeek 深度分析...")
+    company_section = ""
+    if company_info:
+        parts = [f"行业: {company_info.get('industry', '未知')}"]
+        if company_info.get("area"):
+            parts.append(f"地区: {company_info['area']}")
+        company_section = "\n".join(parts)
+
+    prompt = f"""你是资深A股行业研究员。请基于雪球用户讨论，对{stock_name}({xq_code})做一份深度分析报告。
+
+{company_section}
+
+**输出格式（1200-1800字，内容要充实）：**
+
+### {stock_name} 深度分析
+
+**公司定位与商业模式**
+2-3句话讲清公司做什么、怎么赚钱、处于产业链什么位置。
+
+**行业地位与竞争壁垒**
+在讨论区信息基础上，分析公司的护城河（技术/客户/成本/规模等），以及面临的竞争威胁。
+
+**看多逻辑**
+- 每条2-3句话，包含具体的数据、逻辑链或政策依据
+- 区分短期催化（1-3个月）和长期逻辑（1年+）
+- 至少4条
+
+**看空风险**
+- 每条2-3句话，说明风险的具体机制和影响程度
+- 区分已知风险（市场已反映）和潜在风险（可能尚未定价）
+- 至少3条
+
+**近期关键事件追踪**
+- 按时间线列出近期影响股价的重大事件
+- 每个事件说明市场反应和后续影响
+
+**市场情绪与资金面**
+- 当前雪球社区的整体情绪倾向（给出看多/看空/分歧的比例估计）
+- 讨论热度变化趋势（升温/冷却）
+- 有无大V或机构观点值得关注
+
+**投资要点总结**
+3-5条核心结论，给出需要持续跟踪的关键变量
+
+**写作要求**
+- 只基于讨论区真实内容，不凭空编造
+- 如果某个维度讨论区信息不足，标注「讨论区信息有限，待进一步研究」
+- 语言专业、类似券商研报风格
+- 关键数字和逻辑用**加粗**标注
+
+雪球讨论区原始数据（{len(cleaned)} 条有效评论）:
+{comment_text[:12000]}
+"""
+    try:
+        ai_client = _deepseek_client()
+        if ai_client is None:
+            raise RuntimeError("未配置 DeepSeek")
+
+        resp = ai_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是资深A股行业研究员。写作风格：专业、深度、信息密度高。"
+                        "只基于提供的讨论区内容分析，不编造。不足处诚实标注。"
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=4096,
+        )
+        summary = (resp.choices[0].message.content or "").strip()
+        print(f"AI 分析完成 ({len(summary)} 字)")
+    except Exception as exc:
+        title = f"AI 失败 · {stock_name}"
+        md_text = f"❌ {stock_name}({xq_code}) 分析失败: {exc}"
+        send_dingtalk_markdown(title, md_text)
+        return
+
+    # ---- 推送到钉钉 ----
+    title = f"{stock_name} 分析"
+    # 钉钉 markdown 限制约 20000 字符
+    md_text = (
+        f"## {stock_name}({xq_code}) 深度分析\n\n"
+        f"> 基于雪球 {len(all_posts)} 条帖子 · AI 生成仅供参考\n\n"
+        f"---\n\n"
+        f"{summary[:18000]}"
+    )
+
+    send_dingtalk_markdown(title, md_text)
+    print("分析完成，已推送到钉钉。")
+
+
 def init_portfolio_state_only() -> None:
     """仅把各组合「当前最新调仓时间」写入 state，不推送、不调 AI。"""
     state = load_state()
@@ -1041,7 +1233,20 @@ if __name__ == "__main__":
         action="store_true",
         help="强制 Markdown 文本推送（默认 HTML 渲染为图片）",
     )
+    parser.add_argument(
+        "--stock-query",
+        default="",
+        help="查询指定股票（名称或代码），分析雪球讨论区并推送钉钉",
+    )
     args = parser.parse_args()
+
+    # ---- stock_query 模式 ----
+    stock_query = (args.stock_query or os.getenv("STOCK_QUERY", "")).strip()
+    if stock_query:
+        print(f"=== 股票查询模式: {stock_query} ===")
+        _run_stock_query(stock_query)
+        return
+
     if args.init_state:
         init_portfolio_state_only()
     else:

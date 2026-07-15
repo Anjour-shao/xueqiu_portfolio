@@ -7,6 +7,12 @@ on:
         description: "调仓回溯日历天数（正常 2；测试可设 365）"
         required: false
         default: "2"
+      stock_query:
+        description: "查询股票（输入名称或代码如 铖昌科技/001270，留空则跑每日摘要）"
+        required: false
+        default: ""
+  schedule:
+    - cron: "0 12 * * *"   # UTC 12:00 = 北京时间 20:00
   repository_dispatch:
     types: [run_digest]
 
@@ -63,7 +69,15 @@ jobs:
           IMG_BB_API_KEY: ${{ secrets.IMG_BB_API_KEY }}
           DIGEST_PUSH_MODE: image
           DIGEST_LOOKBACK_DAYS: ${{ inputs.lookback_days || '2' }}
+          STOCK_QUERY: ${{ inputs.stock_query || '' }}
         run: |
           set -euo pipefail
           export DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
-          python daily_digest/daily_portfolio_digest.py
+          STOCK_QUERY="${{ inputs.stock_query || '' }}"
+          if [ -n "${STOCK_QUERY}" ]; then
+            echo "stock_query 模式: ${STOCK_QUERY}"
+            python daily_digest/daily_portfolio_digest.py --stock-query "${STOCK_QUERY}"
+          else
+            echo "每日摘要模式"
+            python daily_digest/daily_portfolio_digest.py
+          fi
