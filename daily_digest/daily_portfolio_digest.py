@@ -917,7 +917,7 @@ def check_portfolio_for_nightly_digest(
 def _resolve_stock_online(keyword: str) -> tuple[str, str]:
     """纯在线解析股票名称/代码 -> (雪球代码, 股票名称)。
 
-    优先级: 新浪suggest > 输入即为代码直接构造 > 雪球搜索。
+    优先级: 数字直接构造 > 新浪suggest > 腾讯suggest > 东方财富。
     不依赖任何本地数据库。
     """
     kw = keyword.strip()
@@ -942,7 +942,7 @@ def _resolve_stock_online(keyword: str) -> tuple[str, str]:
         alt_name = _verify_sina_symbol(f"{alt_market}{digits}")
         if alt_name:
             return alt_xq, alt_name
-        # 两个市场都不行，用原代码硬上（可能是新股）
+        # 两个市场都不行，用原代码硬上（可能是新股/ETF等）
         return xq_code, kw
 
     # ---- 名称搜索：新浪 suggest ----
@@ -953,7 +953,15 @@ def _resolve_stock_online(keyword: str) -> tuple[str, str]:
     except Exception as exc:
         print(f"  新浪 suggest 失败: {exc}")
 
-    # ---- 回退：东方财富搜索 ----
+    # ---- 回退1：腾讯 suggest ----
+    try:
+        name, code = _search_tencent_suggest(kw)
+        if name and code:
+            return code, name
+    except Exception as exc:
+        print(f"  腾讯 suggest 失败: {exc}")
+
+    # ---- 回退2：东方财富搜索 ----
     try:
         name, code = _search_eastmoney(kw)
         if name and code:
@@ -989,38 +997,78 @@ def _verify_sina_symbol(sina_symbol: str) -> str | None:
 
 
 def _search_sina_suggest(keyword: str) -> tuple[str | None, str | None]:
-    """新浪智能提示: https://suggest3.sinajs.cn/suggest/"""
+    """新浪智能提示: https://suggest3.sinajs.cn/suggest/
+
+    返回格式: var suggestvalue="铖昌科技,11,001270,sz001270,..."
+    fields: name, type, code, symbol
+    """
     url = f"https://suggest3.sinajs.cn/suggest/type=11,12,13,14,15&key={requests.utils.quote(keyword)}"
     headers = {**_SINA_HEADERS, "Referer": "https://finance.sina.com.cn/"}
     resp = requests.get(url, headers=headers, timeout=10)
     resp.encoding = "gbk"
     text = resp.text
 
-    # 格式: var suggestvalue="11_601127,赛力斯,SH,...;12_...";
-    import re as _re
-    # 匹配 A 股（type=11）: 11_600519,贵州茅台,SH,...
-    for line in text.split(";"):
-        line = line.strip()
-        if not line:
-            continue
-        # 把 var 前缀去掉
-        if "=" in line:
-            line = line.split("=", 1)[1].strip().strip('"')
-        parts = line.split(",")
-        if len(parts) >= 3:
-            suggest_type = parts[0]
-            if suggest_type in ("11", "12", "13", "14", "15"):  # A股相关类型
-                stock_name = parts[1].strip()
-                symbol_raw = parts[2].strip()
-                if not stock_name or not symbol_raw:
-                    continue
-                # symbol_raw 是 6 位数字，根据前缀判断市场
-                if symbol_raw.startswith(("5", "6", "9")):
-                    xq_code = f"SH{symbol_raw}"
-                else:
-                    xq_code = f"SZ{symbol_raw}"
-                return stock_name, xq_code
+    # 去掉 "var suggestvalue=" 前缀和末尾分号
+    if "=" in text:
+        text = text.split("=", 1)[1].strip().strip('";')
+    if not text:
+        return None, None
 
+    # 格式: 铖昌科技,11,001270,sz001270,铖昌科技,,...
+    parts = text.split(",")
+    if len(parts) >= 4:
+        name = parts[0].strip()
+        code = parts[2].strip()
+        symbol = parts[3].strip()  # sz001270 或 sh600519
+        if name and code and len(code) == 6:
+            # 从 symbol 直接提取市场
+            if symbol.lower().startswith("sh"):
+                xq_code = f"SH{code}"
+            elif symbol.lower().startswith("sz"):
+                xq_code = f"SZ{code}"
+            elif code.startswith(("5", "6", "9")):
+                xq_code = f"SH{code}"
+            else:
+                xq_code = f"SZ{code}"
+            return name, xq_code
+
+    return None, None
+
+
+def _search_tencent_suggest(keyword: str) -> tuple[str | None, str | None]:
+    """腾讯财经智能提示: https://smartbox.gtimg.cn/s3/
+
+    返回格式: v_hint="sz~001270~铖昌科技~cckj~GP-A"
+    fields: market~code~name~pinyin~type
+    """
+    url = f"https://smartbox.gtimg.cn/s3/?q={requests.utils.quote(keyword)}&t=all"
+    try:
+        resp = requests.get(url, timeout=10)
+        # 腾讯返回的是 ASCII + unicode escapes，不要用 gbk
+        text = resp.text.strip()
+        # 去掉 v_hint= 前缀和引号
+        if "=" in text:
+            text = text.split("=", 1)[1].strip().strip('"')
+        if not text:
+            return None, None
+        parts = text.split("~")
+        if len(parts) >= 3:
+            market = parts[0].strip().lower()  # sz
+            code = parts[1].strip()            # 001270
+            name_raw = parts[2].strip()        # 可能是 铖昌... 或直接中文
+            # 解码 JSON-style unicode escapes
+            if "\\u" in name_raw:
+                try:
+                    name = name_raw.encode().decode("unicode_escape")
+                except Exception:
+                    name = name_raw
+            else:
+                name = name_raw
+            if name and code and len(code) == 6 and code.isdigit() and market in ("sz", "sh"):
+                xq_code = f"{market.upper()}{code}"
+                return name, xq_code
+    except Exception:
+        pass
     return None, None
 
 
@@ -1030,17 +1078,28 @@ def _search_eastmoney(keyword: str) -> tuple[str | None, str | None]:
         "https://searchapi.eastmoney.com/bussiness/Web/GetCMSSearchResult"
         f"?type=8193&pageindex=1&pagesize=5&keyword={requests.utils.quote(keyword)}"
     )
-    resp = requests.get(url, timeout=10)
-    data = resp.json()
-    items = data.get("Data", []) if data.get("Data") else []
-    if items:
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return None, None
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None, None
+        items = data.get("Data")
+        if not isinstance(items, list) or not items:
+            return None, None
         item = items[0]
+        if not isinstance(item, dict):
+            return None, None
         code = item.get("Code", "")
         name = item.get("Name", "")
-        market = item.get("Market", "")
-        if code and len(code) == 6:
-            xq_code = f"SH{code}" if market in ("1", "沪市") else f"SZ{code}"
-            return name, xq_code
+        market = str(item.get("Market", ""))
+        if code and len(str(code)) == 6:
+            code_str = str(code)
+            xq_code = f"SH{code_str}" if market in ("1", "沪市", "SH") else f"SZ{code_str}"
+            return str(name), xq_code
+    except Exception as exc:
+        print(f"  东方财富解析异常: {exc}")
     return None, None
 
 
