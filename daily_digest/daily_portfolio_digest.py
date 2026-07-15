@@ -1,9 +1,10 @@
-"""每日组合 Digest：硬编码关注组合 + 个人持仓，钉钉推送。
+"""每日组合 Digest + 铖昌科技价格监控，钉钉推送。
 
 设计（中长线 / 每晚 8 点一次）：
 - 每晚跑一次，对比 state 里上次已推送的调仓时间；有更新才做 AI + 推送调仓段
 - 同一天组合调仓多次：当晚合并为一条 digest，按时间顺序列出各批次
-- 推送默认 HTML 渲染为图片（见 digest/ 目录）
+- 铖昌科技(001270) 价格监控：<=105 / <=96 触发加仓提醒
+- 有事件（调仓/价格触发）→ 渲染图片推送；无事件 → 文字心跳保活
 """
 
 from __future__ import annotations
@@ -24,56 +25,60 @@ from typing import Any
 # 硬编码配置
 # ---------------------------------------------------------------------------
 WATCH_PORTFOLIOS: list[str] = [
-    "ZH3337164",
-    "ZH3472193",
-    "ZH3558598",
-    "ZH3300885",
-    "ZH1236871",
-    "ZH3393223",
-    "ZH3483962",
-    "ZH3104761",
-    "ZH3437281",
-    "ZH3476690",
-    "ZH3530915",
-    "ZH3546223",
-    "ZH3484875",
+    "ZH3337164",  # 三年10倍
+    "ZH3393223",  # 血战到底
+    "ZH3558598",  # 2026垃圾站
 ]
 
 PORTFOLIO_NAMES: dict[str, str] = {
     "ZH3337164": "三年10倍",
-    "ZH3472193": "利润断层",
-    "ZH3558598": "2026垃圾站",
-    "ZH3300885": "AI概念",
-    "ZH1236871": "赌出个自由",
     "ZH3393223": "血战到底",
-    "ZH3483962": "投资界老萨满",
-    "ZH3104761": "景气组合",
-    "ZH3437281": "实仓跟踪",
-    "ZH3476690": "科技",
-    "ZH3530915": "复利中线",
-    "ZH3546223": "争取五倍",
-    "ZH3484875": "钽坦",
+    "ZH3558598": "2026垃圾站",
 }
 
-# 用户每日发言提炼
-DIGEST_USER_ID = "7845696728"
+# ---- 价格监控（多股票，双向触发） ----
+# direction: "below" = 跌到目标价触发（加仓）; "above" = 涨到目标价触发（止盈）
+PRICE_ALERT_STOCKS: list[dict] = [
+    {
+        "code": "SZ001270",
+        "name": "铖昌科技",
+        "sina_symbol": "sz001270",
+        "holdings": "2手 成本~160",
+        "targets": [
+            (105.0, "加仓第1批 (1手 @105)", "below"),
+            (96.0,  "加仓第2批 (2手 @96)",  "below"),
+        ],
+    },
+    {
+        "code": "SZ003043",
+        "name": "华亚智能",
+        "sina_symbol": "sz003043",
+        "holdings": "2手 浮盈+25%",
+        "targets": [
+            (95.0,  "止盈第1档 (卖1手 @95)",  "above"),
+            (105.0, "止盈第2档 (卖1手 @105)", "above"),
+            (72.0,  "保利止损 (卖1手 @72)",   "below"),
+            (65.0,  "清仓线 (全清 @65)",       "below"),
+        ],
+    },
+]
 
-# 评论：拉最新 N 条（约 3 页 × 20），不做「近 3 天」过滤
+# 评论：拉最新 N 条（约 3 页 x 20）
 COMMENT_TARGET_COUNT = 50
 COMMENT_PAGE_SIZE = 20
 COMMENT_MAX_PAGES = 3
 
 # 回溯调仓历史页数（防同日多批漏报）
 REBALANCE_HISTORY_PAGES = 5
-# 每晚每组合最多处理几批调仓（同日多批合并时截断）
+# 每晚每组合最多处理几批调仓
 MAX_BATCHES_PER_PORTFOLIO = 3
-# 单次运行最多调用 DeepSeek 次数（防首次未 init-state 爆量）
+# 单次运行最多调用 DeepSeek 次数
 MAX_AI_CALLS_PER_RUN = 8
 
 # 测试：模拟「今晚 8 点」的时间点；生产环境保持 None
 TEST_SIMULATE_NOW: str | None = None
 
-STATE_VERSION = 3
+STATE_VERSION = 4
 
 # ---------------------------------------------------------------------------
 
@@ -90,6 +95,7 @@ load_dotenv(BACKEND / ".env")
 load_dotenv(ROOT.parent / ".env")
 if not os.getenv("ACCOUNT_DASHBOARD_DATABASE_URL", "").strip():
     os.environ["ACCOUNT_DASHBOARD_DATABASE_URL"] = "sqlite:///:memory:"
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name, "").strip()
@@ -121,7 +127,7 @@ from xueqiu.integrations.xueqiu.portfolio import (
     validate_portfolio_id,
 )
 from xueqiu.integrations.xueqiu.auth import COOKIE_REFRESH_HINT, is_cookie_invalid_text, load_cookie
-from xueqiu.integrations.xueqiu.posts import fetch_stock_posts, fetch_user_timeline_page
+from xueqiu.integrations.xueqiu.posts import fetch_stock_posts
 
 
 def _now() -> datetime:
@@ -132,6 +138,11 @@ def _now() -> datetime:
 
 def _parse_rebalance_dt(value: str) -> datetime:
     return datetime.strptime(value[:19], "%Y-%m-%d %H:%M:%S")
+
+
+# ===================================================================
+# Data classes
+# ===================================================================
 
 
 @dataclass
@@ -149,11 +160,25 @@ class PortfolioUpdate:
 
 
 @dataclass
-class UserPostsDigest:
-    """用户当日发言提炼结果。"""
-    post_count: int
-    summary: str  # AI 提炼的核心观点文本
-    raw_text: str = ""  # 原始帖子文本（供调试）
+class PriceAlert:
+    """多股票价格触发提醒"""
+    triggered: bool  # 是否有新触发
+    stocks: list[dict]  # [{"name":..., "code":..., "current_price":..., "targets_hit":[...]}]
+
+
+@dataclass
+class PriceTargetResult:
+    target: float
+    label: str
+    direction: str  # "above" / "below"
+    hit: bool
+    already_triggered: bool
+    triggered_now: bool
+
+
+# ===================================================================
+# State
+# ===================================================================
 
 
 def _empty_state() -> dict[str, Any]:
@@ -161,6 +186,7 @@ def _empty_state() -> dict[str, Any]:
         "version": STATE_VERSION,
         "last_digest_at": None,
         "portfolios": {},
+        "price_alerts": {"triggered": {}},
     }
 
 
@@ -176,9 +202,9 @@ def load_state() -> dict[str, Any]:
     if not isinstance(raw, dict):
         return _empty_state()
 
-    # 兼容旧版本 state
-    ver = raw.get("version")
-    if ver != STATE_VERSION:
+    # 迁移旧版本 state
+    ver = raw.get("version", 0)
+    if ver < STATE_VERSION:
         migrated = _empty_state()
         migrated["last_digest_at"] = raw.get("last_digest_at")
         if isinstance(raw.get("portfolios"), dict):
@@ -189,12 +215,17 @@ def load_state() -> dict[str, Any]:
                     migrated["portfolios"][str(key)] = {"last_notified_rebalance_time": val}
                 elif str(key).startswith("ZH") and isinstance(val, dict):
                     migrated["portfolios"][str(key)] = dict(val)
+        # 迁移 price_alerts
+        if isinstance(raw.get("price_alerts"), dict):
+            migrated["price_alerts"] = dict(raw["price_alerts"])
         print(f"已将 state 从 v{ver} 迁移到 v{STATE_VERSION}。")
         return migrated
 
     state = _empty_state()
     state["last_digest_at"] = raw.get("last_digest_at")
     state["portfolios"] = dict(raw.get("portfolios") or {})
+    if isinstance(raw.get("price_alerts"), dict):
+        state["price_alerts"] = dict(raw["price_alerts"])
     return state
 
 
@@ -220,6 +251,106 @@ def _set_portfolio_last_notified(
     state["portfolios"][portfolio_id] = prev
 
 
+def _price_alert_already_triggered(state: dict[str, Any], target_key: str) -> bool:
+    return bool(state.get("price_alerts", {}).get("triggered", {}).get(target_key))
+
+
+def _mark_price_alert_triggered(state: dict[str, Any], target_key: str) -> None:
+    state.setdefault("price_alerts", {}).setdefault("triggered", {})
+    state["price_alerts"]["triggered"][target_key] = _now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ===================================================================
+# 价格抓取
+# ===================================================================
+
+_SINA_HEADERS = {
+    "Referer": "https://finance.sina.com.cn/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+}
+
+
+def fetch_sina_spot(sina_symbol: str) -> float | None:
+    """从新浪实时行情获取现价。"""
+    url = f"https://hq.sinajs.cn/list={sina_symbol}"
+    try:
+        resp = requests.get(url, headers=_SINA_HEADERS, timeout=15)
+        resp.encoding = "gbk"
+        text = resp.text
+        eq = text.find("=")
+        if eq < 0:
+            return None
+        payload = text[eq + 1:].strip().strip('";')
+        parts = payload.split(",")
+        if len(parts) < 4:
+            return None
+        price = float(parts[3])
+        if price <= 0:
+            return None
+        return price
+    except Exception as e:
+        print(f"获取行情失败: {e}")
+        return None
+
+
+def check_price_alerts(state: dict[str, Any]) -> PriceAlert:
+    """检查所有监控股票的价格触发。"""
+    stock_results = []
+    any_triggered = False
+
+    for cfg in PRICE_ALERT_STOCKS:
+        price = fetch_sina_spot(cfg["sina_symbol"])
+        if price is None:
+            stock_results.append({
+                "name": cfg["name"],
+                "code": cfg["code"],
+                "holdings": cfg.get("holdings", ""),
+                "current_price": None,
+                "error": f"无法获取行情",
+                "targets_hit": [],
+            })
+            continue
+
+        targets_hit = []
+        for target, label, direction in cfg["targets"]:
+            target_key = f"{cfg['code']}_{target}_{direction}"
+            already = _price_alert_already_triggered(state, target_key)
+
+            if direction == "below":
+                hit_now = price <= target
+            else:  # "above"
+                hit_now = price >= target
+
+            is_new = hit_now and not already
+            targets_hit.append({
+                "target": target,
+                "label": label,
+                "direction": direction,
+                "hit": hit_now,
+                "already_triggered": already,
+                "triggered_now": is_new,
+            })
+            if is_new:
+                any_triggered = True
+                _mark_price_alert_triggered(state, target_key)
+
+        stock_results.append({
+            "name": cfg["name"],
+            "code": cfg["code"],
+            "holdings": cfg.get("holdings", ""),
+            "current_price": price,
+            "error": "",
+            "targets_hit": targets_hit,
+        })
+
+    return PriceAlert(triggered=any_triggered, stocks=stock_results)
+
+
+# ===================================================================
+# DeepSeek
+# ===================================================================
+
+
 def _deepseek_client() -> OpenAI | None:
     if not DEEPSEEK_API_KEY:
         return None
@@ -238,7 +369,7 @@ def clean_xueqiu_comments(raw_comments_list: list[str]) -> list[str]:
 
 
 def fetch_stock_comments(client: XueQiuApiClient, symbol: str) -> str:
-    print(f"      抓取舆情: {symbol}（目标 ≥{COMMENT_TARGET_COUNT} 条）…")
+    print(f"      抓取舆情: {symbol}（目标 >={COMMENT_TARGET_COUNT} 条）…")
     posts = None
     last_exc: Exception | None = None
     for attempt in range(1, 4):
@@ -321,6 +452,11 @@ def call_deepseek_summary(stock_name: str, comments: str, *, verbose: bool = Fal
         return f"AI 分析生成异常: {exc}"
 
 
+# ===================================================================
+# 组合调仓
+# ===================================================================
+
+
 def fetch_rebalances_since(
     client: XueQiuApiClient,
     portfolio_id: str,
@@ -330,11 +466,6 @@ def fetch_rebalances_since(
     today_only: bool = False,
     lookback_days: int = 2,
 ) -> list[dict[str, Any]]:
-    """拉取 (since_time, as_of] 区间内、晚于上次推送的手动调仓。
-
-    默认不按「仅当天」过滤，而是靠 since_time（last_notified）防历史重复；
-    lookback_days 限制最远回溯日历天数，避免 state 异常时一次性补推过多旧批次。
-    """
     pid = validate_portfolio_id(portfolio_id)
     as_of_dt = as_of or _now()
 
@@ -389,7 +520,6 @@ def fetch_rebalances_since(
 
 def _truncate_ai_text(text: str, limit: int = 1400) -> str:
     from digest.render import _truncate
-
     return _truncate(text, limit)
 
 
@@ -428,7 +558,6 @@ def _portfolio_update_markdown(update: PortfolioUpdate) -> str:
 
 
 def _apply_dingtalk_keyword(text: str) -> str:
-    """钉钉自定义关键词只匹配 markdown.text 正文，不匹配 title 字段。"""
     if not DINGTALK_KEYWORD:
         return text
     if DINGTALK_KEYWORD in text:
@@ -445,7 +574,6 @@ def send_dingtalk_markdown(title: str, md_text: str) -> bool:
     if DINGTALK_KEYWORD:
         print(f"      钉钉消息已注入关键词: {DINGTALK_KEYWORD}")
 
-    # 钉钉 markdown 正文上限约 20000 字节，过长会被拒收
     max_chars = 18000
     if len(md_text) > max_chars:
         print(f"      钉钉正文过长 ({len(md_text)} 字)，已截断至 {max_chars} 字。")
@@ -534,128 +662,12 @@ def _build_watch_summary(updates: list[PortfolioUpdate]) -> dict[str, Any] | Non
     }
 
 
-def fetch_today_user_posts(
-    client: XueQiuApiClient,
-    user_id: str,
-    *,
-    max_pages: int = 5,
-) -> list[dict[str, Any]]:
-    """逐页抓取用户 timeline，按 created_at 过滤当天帖子。
-
-    雪球 timeline 前几页可能全是置顶帖（日期很旧），不能在第 1 页就停。
-    前 2 页无论如何都要翻完；从第 3 页起，遇到整页无当天帖才停止。
-    """
-    today = _now().strftime("%Y-%m-%d")
-    today_posts: list[dict[str, Any]] = []
-
-    for page in range(1, max_pages + 1):
-        try:
-            posts, has_more = fetch_user_timeline_page(
-                client, user_id, page=page, count=20
-            )
-        except Exception as exc:
-            print(f"      用户帖子第 {page} 页获取失败: {exc}")
-            break
-
-        if not posts:
-            print(f"      用户帖子第 {page} 页无数据，停止翻页。")
-            break
-
-        page_has_today = False
-        newest_date = ""
-        for p in posts:
-            post_date = (p.created_at or "")[:10]
-            if not newest_date or post_date > newest_date:
-                newest_date = post_date
-            if post_date == today:
-                page_has_today = True
-                today_posts.append({
-                    "id": p.id,
-                    "text": p.text,
-                    "created_at": p.created_at,
-                    "like_count": p.like_count,
-                    "reply_count": p.reply_count,
-                    "retweet_count": p.retweet_count,
-                })
-
-        if page_has_today:
-            print(f"      第 {page} 页命中当天帖子（累计 {len(today_posts)} 条），继续…")
-        else:
-            # 前 2 页可能全是置顶帖，不在此停止
-            if page <= 2:
-                print(f"      第 {page} 页无当天帖子（最新 {newest_date}），可能有置顶帖，继续翻页…")
-            else:
-                print(f"      第 {page} 页无当天帖子（最新 {newest_date}），停止翻页。")
-                break
-
-        if not has_more:
-            break
-        if page < max_pages:
-            time.sleep(random.uniform(0.5, 1.0))
-
-    print(f"      用户 {user_id} 今日共 {len(today_posts)} 条帖子。")
-    return today_posts
-
-
-def call_deepseek_summarize_user_posts(posts: list[dict[str, Any]], *, verbose: bool = False) -> str:
-    """用 DeepSeek 提炼用户当日发言的核心投资观点。"""
-    if not posts:
-        return ""
-
-    client = _deepseek_client()
-    if client is None:
-        return "未配置 DEEPSEEK_API_KEY，跳过用户发言提炼。"
-
-    # 拼接当日帖子文本
-    items = []
-    for idx, p in enumerate(posts, 1):
-        text = (p.get("text") or "").replace("\n", " ")
-        if len(text) > 400:
-            text = text[:400] + "…"
-        items.append(f"[{idx}] {text}")
-    posts_text = "\n\n".join(items)
-
-    if verbose:
-        key_hint = f"{DEEPSEEK_API_KEY[:8]}…" if len(DEEPSEEK_API_KEY) > 8 else "(空)"
-        print(f"      >>> 调用 DeepSeek 提炼用户发言（base={DEEPSEEK_BASE_URL}, key={key_hint}）")
-
-    prompt = f"""
-你是一个专业的投资信息提炼助手。以下是某位雪球用户今日的全部发言，请提炼核心内容。
-
-输出要求：
-1. 直接从【核心观点】、【关注个股/板块】、【宏观判断】三个小标题开始，不要任何开场白。
-2. 提取每一条中涉及的投资判断、产业逻辑、仓位变动暗示；过滤纯情绪发泄或日常寒暄。
-3. 每个维度 2-5 条要点，总字数 300-500 字。
-4. 观点之间用空行分隔，每条一句话即可。
-
-今日发言原始数据：
-{posts_text}
-"""
-    try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是专业的投资信息提炼助手。禁止开场白，直接输出三个维度要点。",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-        )
-        content = response.choices[0].message.content
-        summary = (content or "").strip()
-        if verbose:
-            preview = summary.replace("\n", " ")[:120]
-            print(f"      <<< DeepSeek 返回 {len(summary)} 字: {preview}…")
-        return summary
-    except Exception as exc:
-        print(f"      用户发言提炼失败: {exc}")
-        return f"AI 提炼异常: {exc}"
+# ===================================================================
+# Cookie
+# ===================================================================
 
 
 def _probe_xueqiu_cookie() -> dict[str, Any]:
-    """启动时探测 Cookie 是否仍可拉调仓 API。"""
     try:
         cookie = load_cookie()
     except RuntimeError as exc:
@@ -681,15 +693,20 @@ def _cookie_alert_payload(message: str) -> dict[str, str]:
     }
 
 
+# ===================================================================
+# 推送
+# ===================================================================
+
+
 def send_dingtalk_digest(
     *,
     run_time: str,
     updates: list[PortfolioUpdate] | None = None,
     force_markdown: bool = False,
     cookie_alert: dict[str, str] | None = None,
-    user_posts: UserPostsDigest | None = None,
+    price_alert: PriceAlert | None = None,
 ) -> None:
-    """推送简报：默认 HTML 渲染为图片；失败时回退 Markdown。"""
+    """推送简报：有事件→图片；无事件→文字心跳。"""
     from digest import render as digest_render
 
     updates = updates or []
@@ -697,12 +714,14 @@ def send_dingtalk_digest(
     title = _digest_push_title(updates)
     if cookie_alert and not updates:
         title = "Cookie 过期 · 请更新"
-    if user_posts and user_posts.post_count > 0:
-        title += " · 用户观点"
+    if price_alert and price_alert.triggered:
+        title += " · 加仓提醒"
     simulate_note = f"模拟 {TEST_SIMULATE_NOW}" if TEST_SIMULATE_NOW else ""
     push_mode = digest_render.DIGEST_PUSH_MODE or "image"
 
-    if not force_markdown and push_mode in ("image", "both"):
+    has_event = bool(updates) or (price_alert and price_alert.triggered) or bool(cookie_alert)
+
+    if has_event and not force_markdown and push_mode in ("image", "both"):
         try:
             ok, local_path = digest_render.push_digest_image(
                 run_time=run_time,
@@ -710,7 +729,7 @@ def send_dingtalk_digest(
                 updates=updates,
                 watch_summary=watch_summary,
                 cookie_alert=cookie_alert,
-                user_posts=user_posts,
+                price_alert=price_alert,
                 title=title,
             )
             if ok and push_mode == "image":
@@ -723,6 +742,7 @@ def send_dingtalk_digest(
         except Exception as exc:
             print(f"      图片简报失败，回退 Markdown: {exc}")
 
+    # Markdown 推送（回退 或 心跳）
     mode = f" · 模拟 {TEST_SIMULATE_NOW}" if TEST_SIMULATE_NOW else ""
     md_parts = [
         f"## 📊 每日组合简报{mode}",
@@ -730,19 +750,41 @@ def send_dingtalk_digest(
         f"> {run_time}",
         "",
     ]
+
     if cookie_alert:
-        md_parts.extend(
-            [
-                "### ⚠️ Cookie 已失效",
-                "",
-                cookie_alert.get("message", ""),
-                "",
-                cookie_alert.get("hint", COOKIE_REFRESH_HINT),
-                "",
-                "---",
-                "",
-            ]
-        )
+        md_parts.extend([
+            "### ⚠️ Cookie 已失效",
+            "",
+            cookie_alert.get("message", ""),
+            "",
+            cookie_alert.get("hint", COOKIE_REFRESH_HINT),
+            "",
+            "---",
+            "",
+        ])
+
+    # 价格提醒
+    if price_alert:
+        md_parts.append("### 💰 价格监控")
+        md_parts.append("")
+        for s in price_alert.stocks:
+            price_str = f"{s['current_price']:.2f}" if s["current_price"] else "获取失败"
+            md_parts.append(f"**{s['name']}** `{s['code']}` 现价: **{price_str}**")
+            md_parts.append("")
+            md_parts.append("| 目标价 | 方向 | 操作 | 状态 |")
+            md_parts.append("|--------|------|------|------|")
+            for t in s["targets_hit"]:
+                dir_label = "📈 止盈" if t["direction"] == "above" else "📉 买入/止损"
+                if t["triggered_now"]:
+                    status = "🔔 **刚触发！**"
+                elif t["hit"]:
+                    status = "⚠ 已触发"
+                else:
+                    diff = t["target"] - s["current_price"] if s["current_price"] else 0
+                    status = f"差 {diff:+.2f}"
+                md_parts.append(f"| {t['target']:.1f} | {dir_label} | {t['label']} | {status} |")
+            md_parts.append("")
+
     if updates:
         md_parts.append("### 🔔 组合调仓")
         md_parts.append("")
@@ -753,45 +795,29 @@ def send_dingtalk_digest(
         md_parts.append("### 🔔 组合调仓")
         md_parts.append("")
         if watch_summary["new_count"] == 0:
-            md_parts.append(
-                f"今晚无新调仓（已巡检 {watch_summary['count']} 个关注组合）。"
-            )
+            p_names = "、".join(p["name"] for p in watch_summary["portfolios"])
+            md_parts.append(f"今晚无新调仓（已巡检 {watch_summary['count']} 个组合: {p_names}）。")
         md_parts.append("")
-    # 用户发言提炼
-    if user_posts and user_posts.summary:
+
+    if not updates and not price_alert.triggered and not cookie_alert:
+        # 纯心跳
         md_parts.append("---")
         md_parts.append("")
-        md_parts.append("### 💬 用户观点提炼")
+        md_parts.append("✅ 系统运行正常")
+        for s in price_alert.stocks:
+            price_str = f"{s['current_price']:.2f}" if s["current_price"] else "获取失败"
+            md_parts.append(f"📌 {s['name']} 现价 {price_str}，目标点位均未触发")
+        p_names = "、".join(p["name"] for p in (watch_summary["portfolios"] if watch_summary else []))
+        md_parts.append(f"📋 关注组合（{p_names}）无新调仓")
         md_parts.append("")
-        md_parts.append(f"> 今日 {user_posts.post_count} 条发言 · AI 核心提炼")
-        md_parts.append("")
-        md_parts.append(user_posts.summary)
-        md_parts.append("")
-    if not updates and not user_posts:
-        if watch_summary and watch_summary.get("count"):
-            md_parts.append(f"今晚无新调仓（已巡检 {watch_summary['count']} 个关注组合）。")
-        else:
-            md_parts.append("今晚无新调仓。")
+        md_parts.append(f"> 心跳时间: {run_time}")
 
     send_dingtalk_markdown(title, "\n".join(md_parts).rstrip() + "\n")
 
 
-def init_portfolio_state_only() -> None:
-    """仅把各组合「当前最新调仓时间」写入 state，不推送、不调 AI（首次上 GHA 前建议跑一次）。"""
-    state = load_state()
-    client = XueQiuApiClient()
-    for pid in [p.strip().upper() for p in WATCH_PORTFOLIOS if p.strip()]:
-        try:
-            crawled = fetch_portfolio_rebalance(pid, client=client)
-            rt = crawled["rebalance_time"]
-            _set_portfolio_last_notified(state, pid, rt)
-            label = PORTFOLIO_NAMES.get(pid, pid)
-            print(f"[{pid}] {label} -> {rt}")
-        except Exception as exc:
-            print(f"[{pid}] 失败: {exc}")
-        time.sleep(random.uniform(0.8, 1.5))
-    save_state(state)
-    print("state 已同步至最新调仓，后续每晚只推送新变化。")
+# ===================================================================
+# 组合巡检
+# ===================================================================
 
 
 def check_portfolio_for_nightly_digest(
@@ -888,24 +914,67 @@ def check_portfolio_for_nightly_digest(
     )
 
 
+def init_portfolio_state_only() -> None:
+    """仅把各组合「当前最新调仓时间」写入 state，不推送、不调 AI。"""
+    state = load_state()
+    client = XueQiuApiClient()
+    for pid in [p.strip().upper() for p in WATCH_PORTFOLIOS if p.strip()]:
+        try:
+            crawled = fetch_portfolio_rebalance(pid, client=client)
+            rt = crawled["rebalance_time"]
+            _set_portfolio_last_notified(state, pid, rt)
+            label = PORTFOLIO_NAMES.get(pid, pid)
+            print(f"[{pid}] {label} -> {rt}")
+        except Exception as exc:
+            print(f"[{pid}] 失败: {exc}")
+        time.sleep(random.uniform(0.8, 1.5))
+    save_state(state)
+    print("state 已同步至最新调仓，后续每晚只推送新变化。")
+
+
+# ===================================================================
+# Main
+# ===================================================================
+
+
 def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None:
     run_time = _now().strftime("%Y-%m-%d %H:%M")
     sim_note = f" [模拟时间，TEST_SIMULATE_NOW={TEST_SIMULATE_NOW}]" if TEST_SIMULATE_NOW else ""
     print(f"=== 每日组合 Digest ({run_time}){sim_note} ===")
     print(f"调仓回溯天数 DIGEST_LOOKBACK_DAYS={DIGEST_LOOKBACK_DAYS}")
+    print(f"关注组合: {len(WATCH_PORTFOLIOS)} 个 ({', '.join(PORTFOLIO_NAMES.get(p, p) for p in WATCH_PORTFOLIOS)})")
+
+    stock_names = [s["name"] for s in PRICE_ALERT_STOCKS]
+    print(f"价格监控: {len(PRICE_ALERT_STOCKS)} 只 ({', '.join(stock_names)})")
 
     base_url = (DEEPSEEK_BASE_URL or "https://api.deepseek.com").strip()
     print(f"DeepSeek: {base_url}")
 
-    if not WATCH_PORTFOLIOS:
-        print("请在脚本顶部配置 WATCH_PORTFOLIOS。")
-        return
-
     state = load_state()
+
+    # ---- Step 1: 检查价格 ----
+    print(f"\n--- 价格检查 ---")
+    price_alert = check_price_alerts(state)
+    for s in price_alert.stocks:
+        if s["current_price"] is not None:
+            print(f"  {s['name']}({s['code']}) 现价: {s['current_price']:.2f}  ({s['holdings']})")
+            for t in s["targets_hit"]:
+                direction_icon = "📈" if t["direction"] == "above" else "📉"
+                if t["triggered_now"]:
+                    print(f"    🔔 {direction_icon} 触发 {t['label']}！")
+                elif t["hit"]:
+                    print(f"    ⚠ {direction_icon} {t['label']}（已触发过）")
+                else:
+                    diff = t["target"] - s["current_price"]
+                    sign = "+" if diff > 0 else ""
+                    print(f"    · {direction_icon} {t['label']}（差 {sign}{diff:.2f}）")
+        else:
+            print(f"  {s['name']}({s['code']}): {s['error']}")
+
+    # ---- Step 2: 检查组合 ----
     updates: list[PortfolioUpdate] = []
     ai_budget = [MAX_AI_CALLS_PER_RUN]
     cookie_alert: dict[str, str] | None = None
-    user_posts: UserPostsDigest | None = None
 
     cookie_probe = _probe_xueqiu_cookie()
     if not cookie_probe.get("ok"):
@@ -936,21 +1005,6 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
                 used = MAX_AI_CALLS_PER_RUN - ai_budget[0]
                 print(f"\n本 run 已调用 DeepSeek {used} 次（上限 {MAX_AI_CALLS_PER_RUN}）。")
 
-            # 用户每日发言提炼（复用同一个 client）
-            if DIGEST_USER_ID:
-                print(f"\n抓取用户 {DIGEST_USER_ID} 今日发言…")
-                today_posts = fetch_today_user_posts(client, DIGEST_USER_ID)
-                print(f"  用户 {DIGEST_USER_ID} 今日 {len(today_posts)} 条帖子。")
-                if today_posts:
-                    summary = call_deepseek_summarize_user_posts(today_posts, verbose=True)
-                    user_posts = UserPostsDigest(
-                        post_count=len(today_posts),
-                        summary=summary,
-                    )
-                    print(f"  用户发言 AI 提炼完成。")
-            else:
-                print("未配置 DIGEST_USER_ID，跳过用户发言提炼。")
-
         elif skip_portfolios:
             print("已跳过组合调仓巡检（--skip-portfolios）。")
         elif cookie_alert:
@@ -958,13 +1012,13 @@ def main(*, skip_portfolios: bool = False, force_markdown: bool = False) -> None
 
         state["last_digest_at"] = run_time
 
-        # 每晚至少推送一次（有调仓或有发言或有 cookie 告警），仅当完全无事时也发一条摘要
+        # ---- Step 3: 推送 ----
         send_dingtalk_digest(
             run_time=run_time,
             updates=updates,
             force_markdown=force_markdown,
             cookie_alert=cookie_alert,
-            user_posts=user_posts,
+            price_alert=price_alert,
         )
     finally:
         try:

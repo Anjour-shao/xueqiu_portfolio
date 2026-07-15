@@ -269,11 +269,46 @@
       color: #3b82f6;
       margin-bottom: 8px;
     }
-    .user-posts-meta {
+    .price-stock {
+      margin-bottom: 12px;
+    }
+    .price-stock:last-child { margin-bottom: 0; }
+    .price-stock-name {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .price-stock-info {
       font-size: 11px;
       color: #8a9199;
-      margin-bottom: 2px;
+      margin-bottom: 6px;
     }
+    .price-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px 8px;
+    }
+    .price-item {
+      background: #f7f9fc;
+      border-radius: 6px;
+      padding: 5px 8px;
+      font-size: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .price-item .ptarget { font-weight: 700; font-size: 11px; }
+    .price-item .plabel { color: #8a9199; font-size: 9px; }
+    .price-tag {
+      display: inline-block;
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 9px;
+      font-weight: 600;
+    }
+    .price-tag.hit { background: #fde8e8; color: #e54545; }
+    .price-tag.wait { background: #e8f5ee; color: #0d9488; }
+    .price-tag.new { background: #e54545; color: #fff; }
     .cookie-alert {
       background: #fff5f5;
       border: 1px solid #fecaca;
@@ -383,26 +418,46 @@
     </div>
     {% endif %}
 
-    {% if user_posts %}
+    {% if price_alert %}
     <div class="card">
-      <div class="card-title">💬 用户观点提炼</div>
-      <div class="user-posts-meta">
-        今日 {{ user_posts.post_count }} 条发言 · AI 核心提炼
+      <div class="card-title">💰 价格监控</div>
+      {% for s in price_alert.stocks %}
+      <div class="price-stock">
+        <div class="price-stock-name">
+          {{ s.name }} <span style="font-weight:400;font-size:10px;color:#8a9199">{{ s.code }}</span>
+        </div>
+        <div class="price-stock-info">
+          现价: <strong>{{ "%.2f"|format(s.current_price) if s.current_price else "获取失败" }}</strong>
+          {% if s.holdings %}<span style="margin-left:6px">{{ s.holdings }}</span>{% endif %}
+        </div>
+        <div class="price-grid">
+          {% for t in s.targets_hit %}
+          <div class="price-item">
+            <div>
+              <span class="ptarget">{{ "%.1f"|format(t.target) }}</span>
+              <span class="plabel">
+                {{ "止盈" if t.direction == "above" else "加仓/止损" }}
+              </span>
+            </div>
+            {% if t.triggered_now %}
+            <span class="price-tag new">触发!</span>
+            {% elif t.hit %}
+            <span class="price-tag hit">已触发</span>
+            {% else %}
+            <span class="price-tag wait">等待</span>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
       </div>
-      {% if user_posts.summary_lines %}
-      <div class="rb-ai" style="margin-top:10px">
-        {% for line in user_posts.summary_lines %}
-        <p>{{ line }}</p>
-        {% endfor %}
-      </div>
-      {% endif %}
+      {% endfor %}
     </div>
     {% endif %}
 
-  {% if not updates and not watch_summary and not user_posts %}
+  {% if not updates and not watch_summary and not price_alert %}
     <div class="card">
       <div class="card-title">暂无内容</div>
-      <p style="font-size:13px;color:#8a9199">今晚无调仓数据与用户发言。</p>
+      <p style="font-size:13px;color:#8a9199">今晚无调仓数据与价格触发。</p>
     </div>
     {% endif %}
 

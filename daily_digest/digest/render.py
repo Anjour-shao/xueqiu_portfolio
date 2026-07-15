@@ -120,7 +120,7 @@ def build_report_context(
     updates: list[Any] | None = None,
     watch_summary: dict[str, Any] | None = None,
     cookie_alert: dict[str, str] | None = None,
-    user_posts: Any | None = None,
+    price_alert: Any | None = None,
 ) -> dict[str, Any]:
     ctx: dict[str, Any] = {
         "title": "每日组合简报",
@@ -129,7 +129,7 @@ def build_report_context(
         "updates": [],
         "watch_summary": watch_summary,
         "cookie_alert": cookie_alert,
-        "user_posts": None,
+        "price_alert": None,
     }
 
     upd_list: list[dict[str, Any]] = []
@@ -173,13 +173,21 @@ def build_report_context(
         )
     ctx["updates"] = upd_list
 
-    if user_posts is not None and getattr(user_posts, "summary", ""):
-        ctx["user_posts"] = {
-            "post_count": getattr(user_posts, "post_count", 0),
-            "summary": getattr(user_posts, "summary", ""),
-            "summary_lines": _ai_summary_to_lines(
-                getattr(user_posts, "summary", ""), limit=2000
-            ),
+    # 价格监控上下文
+    if price_alert is not None:
+        ctx["price_alert"] = {
+            "triggered": getattr(price_alert, "triggered", False),
+            "stocks": [
+                {
+                    "name": s["name"],
+                    "code": s["code"],
+                    "holdings": s.get("holdings", ""),
+                    "current_price": s["current_price"],
+                    "error": s.get("error", ""),
+                    "targets_hit": s["targets_hit"],
+                }
+                for s in getattr(price_alert, "stocks", [])
+            ],
         }
     return ctx
 
@@ -368,7 +376,7 @@ def push_digest_image(
     updates: list[Any] | None = None,
     watch_summary: dict[str, Any] | None = None,
     cookie_alert: dict[str, str] | None = None,
-    user_posts: Any | None = None,
+    price_alert: Any | None = None,
     title: str = "每日组合",
 ) -> tuple[bool, Path | None]:
     context = build_report_context(
@@ -377,7 +385,7 @@ def push_digest_image(
         updates=updates,
         watch_summary=watch_summary,
         cookie_alert=cookie_alert,
-        user_posts=user_posts,
+        price_alert=price_alert,
     )
     html = render_report_html(context)
     safe_time = re.sub(r"[^\d]", "", run_time)[:12] or "digest"
@@ -402,8 +410,13 @@ def push_digest_image(
         caption += f"\n\n组合调仓: {names}"
     elif watch_summary and watch_summary.get("count"):
         caption += f"\n\n组合调仓: 今晚无新调仓（已巡检 {watch_summary['count']} 个）"
-    if user_posts and getattr(user_posts, "post_count", 0) > 0:
-        caption += f"\n\n用户观点: 今日 {getattr(user_posts, 'post_count', 0)} 条发言 · AI 已提炼"
+    if price_alert and getattr(price_alert, "triggered", False):
+        triggered_names = [
+            s["name"] for s in getattr(price_alert, "stocks", [])
+            if any(t.get("triggered_now") for t in s.get("targets_hit", []))
+        ]
+        if triggered_names:
+            caption += f"\n\n🔔 价格触发: {', '.join(triggered_names)}"
     if cookie_alert:
         caption += "\n\n⚠️ Cookie 已失效，请更新后重试"
 
