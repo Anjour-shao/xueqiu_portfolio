@@ -928,12 +928,15 @@ def _run_stock_query(keyword: str) -> None:
     stock_name = kw
     company_info: dict[str, str] = {}
 
-    if len(digits) == 6:
+    # 数字代码：支持 4-6 位，自动补全 + 推断市场
+    if 4 <= len(digits) <= 6:
+        digits = digits.zfill(6)  # 1270 -> 001270
         if digits.startswith(("5", "6", "9")):
             xq_code = f"SH{digits}"
         else:
             xq_code = f"SZ{digits}"
 
+    # 通过 ashare_system 数据库查名称/行业
     try:
         from sqlalchemy import create_engine, text as sa_text
         from xueqiu.config import DATABASE_URL
@@ -954,12 +957,14 @@ def _run_stock_query(keyword: str) -> None:
                     stock_name = str(row[1])
                     company_info = {"industry": str(row[2] or ""), "area": str(row[3] or "")}
             else:
+                # 模糊名称匹配：%铖昌% 能匹配到铖昌科技
                 rows = conn.execute(
                     sa_text(
                         "SELECT ts_code, name, industry, area FROM stock_basic "
-                        "WHERE name LIKE :kw ORDER BY ts_code LIMIT 5"
+                        "WHERE name LIKE :kw ORDER BY "
+                        "CASE WHEN name = :exact THEN 0 ELSE 1 END, ts_code LIMIT 5"
                     ),
-                    {"kw": f"%{kw}%"},
+                    {"kw": f"%{kw}%", "exact": kw},
                 ).fetchall()
                 if rows:
                     row = rows[0]
@@ -1245,7 +1250,7 @@ if __name__ == "__main__":
     if stock_query:
         print(f"=== 股票查询模式: {stock_query} ===")
         _run_stock_query(stock_query)
-        return
+        sys.exit(0)
 
     if args.init_state:
         init_portfolio_state_only()
