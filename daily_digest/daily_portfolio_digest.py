@@ -914,69 +914,149 @@ def check_portfolio_for_nightly_digest(
     )
 
 
+def _resolve_stock_online(keyword: str) -> tuple[str, str]:
+    """纯在线解析股票名称/代码 -> (雪球代码, 股票名称)。
+
+    优先级: 新浪suggest > 输入即为代码直接构造 > 雪球搜索。
+    不依赖任何本地数据库。
+    """
+    kw = keyword.strip()
+
+    # ---- 纯数字：直接构造雪球代码 ----
+    digits = "".join(c for c in kw if c.isdigit())
+    if 4 <= len(digits) <= 6:
+        digits = digits.zfill(6)
+        if digits.startswith(("5", "6", "9")):
+            xq_code = f"SH{digits}"
+            market = "sh"
+        else:
+            xq_code = f"SZ{digits}"
+            market = "sz"
+        # 通过新浪验证这个代码是否存在
+        name = _verify_sina_symbol(f"{market}{digits}")
+        if name:
+            return xq_code, name
+        # 如果当前市场不对，试试另一个
+        alt_market = "sz" if market == "sh" else "sh"
+        alt_xq = f"SH{digits}" if alt_market == "sh" else f"SZ{digits}"
+        alt_name = _verify_sina_symbol(f"{alt_market}{digits}")
+        if alt_name:
+            return alt_xq, alt_name
+        # 两个市场都不行，用原代码硬上（可能是新股）
+        return xq_code, kw
+
+    # ---- 名称搜索：新浪 suggest ----
+    try:
+        name, code = _search_sina_suggest(kw)
+        if name and code:
+            return code, name
+    except Exception as exc:
+        print(f"  新浪 suggest 失败: {exc}")
+
+    # ---- 回退：东方财富搜索 ----
+    try:
+        name, code = _search_eastmoney(kw)
+        if name and code:
+            return code, name
+    except Exception as exc:
+        print(f"  东方财富搜索失败: {exc}")
+
+    raise ValueError(f"未找到匹配的股票: {kw}")
+
+
+def _verify_sina_symbol(sina_symbol: str) -> str | None:
+    """通过新浪行情接口验证股票是否存在，返回名称或 None。"""
+    try:
+        url = f"https://hq.sinajs.cn/list={sina_symbol}"
+        resp = requests.get(url, headers=_SINA_HEADERS, timeout=10)
+        resp.encoding = "gbk"
+        text = resp.text
+        eq = text.find("=")
+        if eq < 0:
+            return None
+        payload = text[eq + 1:].strip().strip('";')
+        if not payload or payload == '""':
+            return None
+        parts = payload.split(",")
+        if len(parts) < 2:
+            return None
+        name = parts[0].strip()
+        if not name or name == "":
+            return None
+        return name
+    except Exception:
+        return None
+
+
+def _search_sina_suggest(keyword: str) -> tuple[str | None, str | None]:
+    """新浪智能提示: https://suggest3.sinajs.cn/suggest/"""
+    url = f"https://suggest3.sinajs.cn/suggest/type=11,12,13,14,15&key={requests.utils.quote(keyword)}"
+    headers = {**_SINA_HEADERS, "Referer": "https://finance.sina.com.cn/"}
+    resp = requests.get(url, headers=headers, timeout=10)
+    resp.encoding = "gbk"
+    text = resp.text
+
+    # 格式: var suggestvalue="11_601127,赛力斯,SH,...;12_...";
+    import re as _re
+    # 匹配 A 股（type=11）: 11_600519,贵州茅台,SH,...
+    for line in text.split(";"):
+        line = line.strip()
+        if not line:
+            continue
+        # 把 var 前缀去掉
+        if "=" in line:
+            line = line.split("=", 1)[1].strip().strip('"')
+        parts = line.split(",")
+        if len(parts) >= 3:
+            suggest_type = parts[0]
+            if suggest_type in ("11", "12", "13", "14", "15"):  # A股相关类型
+                stock_name = parts[1].strip()
+                symbol_raw = parts[2].strip()
+                if not stock_name or not symbol_raw:
+                    continue
+                # symbol_raw 是 6 位数字，根据前缀判断市场
+                if symbol_raw.startswith(("5", "6", "9")):
+                    xq_code = f"SH{symbol_raw}"
+                else:
+                    xq_code = f"SZ{symbol_raw}"
+                return stock_name, xq_code
+
+    return None, None
+
+
+def _search_eastmoney(keyword: str) -> tuple[str | None, str | None]:
+    """东方财富搜索回退。"""
+    url = (
+        "https://searchapi.eastmoney.com/bussiness/Web/GetCMSSearchResult"
+        f"?type=8193&pageindex=1&pagesize=5&keyword={requests.utils.quote(keyword)}"
+    )
+    resp = requests.get(url, timeout=10)
+    data = resp.json()
+    items = data.get("Data", []) if data.get("Data") else []
+    if items:
+        item = items[0]
+        code = item.get("Code", "")
+        name = item.get("Name", "")
+        market = item.get("Market", "")
+        if code and len(code) == 6:
+            xq_code = f"SH{code}" if market in ("1", "沪市") else f"SZ{code}"
+            return name, xq_code
+    return None, None
+
+
 def _run_stock_query(keyword: str) -> None:
     """单独查询某只股票的雪球讨论区 AI 分析，推送到钉钉。"""
     kw = keyword.strip()
     print(f"开始分析股票: {kw}")
 
-    from xueqiu.domain.codes import to_xueqiu_code
     from xueqiu.integrations.xueqiu.client import XueQiuApiClient
 
-    # ---- 解析代码 ----
-    digits = "".join(c for c in kw if c.isdigit())
-    xq_code = ""
-    stock_name = kw
-    company_info: dict[str, str] = {}
-
-    # 数字代码：支持 4-6 位，自动补全 + 推断市场
-    if 4 <= len(digits) <= 6:
-        digits = digits.zfill(6)  # 1270 -> 001270
-        if digits.startswith(("5", "6", "9")):
-            xq_code = f"SH{digits}"
-        else:
-            xq_code = f"SZ{digits}"
-
-    # 通过 ashare_system 数据库查名称/行业
+    # ---- 在线解析股票代码 ----
     try:
-        from sqlalchemy import create_engine, text as sa_text
-        from xueqiu.config import DATABASE_URL
-
-        ashare_url = DATABASE_URL.replace("/portfolio?", "/ashare_system?")
-        ashare_engine = create_engine(ashare_url, pool_pre_ping=True)
-        with ashare_engine.connect() as conn:
-            if xq_code:
-                raw_code = xq_code[2:]
-                row = conn.execute(
-                    sa_text(
-                        "SELECT ts_code, name, industry, area FROM stock_basic "
-                        "WHERE symbol = :sym OR ts_code = :ts LIMIT 1"
-                    ),
-                    {"sym": raw_code, "ts": f"{raw_code}.{xq_code[:2]}"},
-                ).fetchone()
-                if row:
-                    stock_name = str(row[1])
-                    company_info = {"industry": str(row[2] or ""), "area": str(row[3] or "")}
-            else:
-                # 模糊名称匹配：%铖昌% 能匹配到铖昌科技
-                rows = conn.execute(
-                    sa_text(
-                        "SELECT ts_code, name, industry, area FROM stock_basic "
-                        "WHERE name LIKE :kw ORDER BY "
-                        "CASE WHEN name = :exact THEN 0 ELSE 1 END, ts_code LIMIT 5"
-                    ),
-                    {"kw": f"%{kw}%", "exact": kw},
-                ).fetchall()
-                if rows:
-                    row = rows[0]
-                    xq_code = to_xueqiu_code(str(row[0]))
-                    stock_name = str(row[1])
-                    company_info = {"industry": str(row[2] or ""), "area": str(row[3] or "")}
-    except Exception as exc:
-        print(f"数据库查询失败: {exc}")
-
-    if not xq_code:
+        xq_code, stock_name = _resolve_stock_online(kw)
+    except ValueError as exc:
         title = f"查询失败 · {kw}"
-        md_text = f"❌ 未找到匹配的股票: **{kw}**\n\n请尝试输入 6 位代码，如 001270"
+        md_text = f"❌ {exc}\n\n请尝试输入完整代码如 001270 或全称如 铖昌科技"
         send_dingtalk_markdown(title, md_text)
         return
 
@@ -1017,16 +1097,10 @@ def _run_stock_query(keyword: str) -> None:
 
     # ---- AI 分析 ----
     print("正在调用 DeepSeek 深度分析...")
-    company_section = ""
-    if company_info:
-        parts = [f"行业: {company_info.get('industry', '未知')}"]
-        if company_info.get("area"):
-            parts.append(f"地区: {company_info['area']}")
-        company_section = "\n".join(parts)
 
     prompt = f"""你是资深A股行业研究员。请基于雪球用户讨论，对{stock_name}({xq_code})做一份深度分析报告。
 
-{company_section}
+（公司行业信息请从讨论区内容推断，不要编造）
 
 **输出格式（1200-1800字，内容要充实）：**
 
