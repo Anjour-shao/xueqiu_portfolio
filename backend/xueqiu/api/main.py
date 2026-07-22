@@ -78,7 +78,6 @@ from xueqiu.api.services import (
     update_personal_strategy,
     execute_personal_trade,
     get_copy_rebalance_plan,
-    iter_stock_summary_stream,
 )
 from xueqiu.config import DATABASE_URL, HOST, PORT
 from xueqiu.domain.nav_engine import ENGINE_VERSION
@@ -215,30 +214,6 @@ async def sync_xueqiu_stream(account_key: str, request: Request) -> StreamingRes
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-
-@app.post("/api/stock-summary-stream")
-async def stock_summary_stream(request: Request) -> StreamingResponse:
-    """个股讨论区 AI 汇总（SSE 流式进度）。"""
-    import json as _json
-
-    body: dict = {}
-    try:
-        raw = await request.body()
-        body = _json.loads(raw) if raw else {}
-    except Exception:
-        body = {}
-    keyword = str(body.get("keyword", "") or "").strip()
-    pages = int(body.get("pages", 10) or 10)
-
-    async def generate():
-        for chunk in iter_stock_summary_stream(keyword, pages=pages):
-            yield chunk
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
 
 
 @app.get("/api/discovery/stats", response_model=DiscoveryStatsResponse)

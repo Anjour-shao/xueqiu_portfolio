@@ -176,9 +176,6 @@ def update_personal_cash(cash: float) -> dict[str, Any]:
             .where(personal_accounts_table.c.id == account_id)
             .values(cash=round(cash, 2), updated_at=_now())
         )
-    from xueqiu.domain.digest_holdings_export import sync_digest_holdings_after_change
-
-    sync_digest_holdings_after_change()
     return build_personal_account_view()
 
 
@@ -197,9 +194,6 @@ def update_personal_strategy(strategy_id: str) -> dict[str, Any]:
             .where(personal_accounts_table.c.id == account_id)
             .values(strategy_id=sid, updated_at=_now())
         )
-    from xueqiu.domain.digest_holdings_export import sync_digest_holdings_after_change
-
-    sync_digest_holdings_after_change()
     return build_personal_account_view()
 
 
@@ -326,9 +320,6 @@ def execute_personal_trade(
             )
         )
 
-    from xueqiu.domain.digest_holdings_export import sync_digest_holdings_after_change
-
-    sync_digest_holdings_after_change()
     return build_personal_account_view()
 
 
